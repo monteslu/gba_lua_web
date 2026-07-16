@@ -5,11 +5,12 @@
 import { buildRom } from "./pipeline.js";
 
 self.onmessage = async (e) => {
-  const { type, id, source } = e.data || {};
+  const { type, id, source, assets } = e.data || {};
   if (type !== "build") return;
   try {
     const r = await buildRom({
       source,
+      assets: assets || {},
       onProgress: (msg) => self.postMessage({ type: "progress", id, msg }),
     });
     // rom transfers (zero-copy) when present

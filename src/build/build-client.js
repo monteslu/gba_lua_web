@@ -29,7 +29,12 @@ function ensureWorker() {
 /**
  * Build a gbalua source in the browser.
  * @param {string} source main.lua text
- * @param {{onProgress?:(msg:string)=>void}} [opts]
+ * @param {{onProgress?:(msg:string)=>void,
+ *   assets?: {sheet?:{name,bytes}, map?:{name,bytes}, mode7?:{name,bytes},
+ *             music?:Array<{name,bytes}>}}} [opts]
+ *   asset bytes must be PNGs (import conversion happens UI-side); music
+ *   entries are raw tracker modules. Bytes are structured-cloned, not
+ *   transferred — the caller keeps its copies.
  * @returns {Promise<{ok:boolean, rom:Uint8Array|null, log:string, diagnostics:Array}>}
  */
 export function build(source, opts = {}) {
@@ -37,6 +42,6 @@ export function build(source, opts = {}) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, onProgress: opts.onProgress });
-    w.postMessage({ type: "build", id, source });
+    w.postMessage({ type: "build", id, source, assets: opts.assets });
   });
 }

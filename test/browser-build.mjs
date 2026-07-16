@@ -3,6 +3,9 @@
 //      build the same source with the gbalua CLI, assert equal bytes.
 //   2. BOOT SMOKE: run the browser-built ROM 120 frames on the mGBA core and
 //      assert the canvas isn't blank.
+//   3. ASSETS BYTE-IDENTICAL: build starfall WITH its sprite sheet in the
+//      browser vs `gbalua build --sheet` — proves the browser asset path
+//      (SDK asset-headers in a worker) matches the CLI exactly.
 // Run: node test/browser-build.mjs   (starts vite dev internally)
 import { spawn, execFileSync } from "node:child_process";
 import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
@@ -17,8 +20,11 @@ const require = createRequire(import.meta.url);
 const GBALUA = path.dirname(require.resolve("gbalua/package.json"));
 
 const source = await readFile(path.join(GBALUA, "examples", "hello", "main.lua"), "utf8");
+const sfSource = await readFile(path.join(GBALUA, "examples", "starfall", "main.lua"), "utf8");
+const sfSheetPath = path.join(GBALUA, "examples", "starfall", "shmup_sheet.png");
+const sfSheet = await readFile(sfSheetPath);
 
-// ── CLI reference build (the byte-identical baseline) ────────────────────────
+// ── CLI reference builds (the byte-identical baselines) ───────────────────────
 const work = await mkdtemp(path.join(tmpdir(), "gbalua-web-test-"));
 const cliRomPath = path.join(work, "cli.gba");
 const srcPath = path.join(work, "main.lua");
@@ -26,6 +32,14 @@ await writeFile(srcPath, source);
 execFileSync("node", [path.join(GBALUA, "bin", "gbalua.js"), "build", srcPath, "-o", cliRomPath], { stdio: "pipe" });
 const cliRom = await readFile(cliRomPath);
 console.log(`CLI ROM: ${cliRom.length} bytes`);
+
+const sfRomPath = path.join(work, "sf.gba");
+const sfSrcPath = path.join(work, "sf.lua");
+await writeFile(sfSrcPath, sfSource);
+execFileSync("node", [path.join(GBALUA, "bin", "gbalua.js"), "build", sfSrcPath,
+  "--sheet", sfSheetPath, "-o", sfRomPath], { stdio: "pipe" });
+const sfCliRom = await readFile(sfRomPath);
+console.log(`CLI starfall ROM (--sheet): ${sfCliRom.length} bytes`);
 
 // ── start vite dev ────────────────────────────────────────────────────────────
 // spawn the vite bin directly (not via npx — killing the npx wrapper strands
@@ -77,6 +91,22 @@ try {
     console.error("FAIL: emulator canvas is blank after 120 frames");
   } else {
     console.log(`PASS: emulator renders (pixel sum ${smoke.pixelSum})`);
+  }
+
+  // gate 3: assets byte-identical (starfall + its sheet, sound + sheet path)
+  console.log("building starfall with its sprite sheet in the browser…");
+  const r3 = await page.evaluate(
+    ({ src, sheetB64 }) => window.__gbaluaWeb.build(src, { sheet: { name: "shmup_sheet.png", b64: sheetB64 } }),
+    { src: sfSource, sheetB64: sfSheet.toString("base64") },
+  );
+  if (!r3.ok) throw new Error("browser starfall build failed:\n" + r3.log);
+  const sfWebRom = Buffer.from(r3.romBase64, "base64");
+  console.log(`browser starfall ROM: ${sfWebRom.length} bytes`);
+  if (!sfWebRom.equals(sfCliRom)) {
+    failed = true;
+    console.error(`FAIL: starfall browser ROM differs from CLI --sheet ROM (${sfWebRom.length} vs ${sfCliRom.length} bytes)`);
+  } else {
+    console.log("PASS: starfall (sheet + sound) browser ROM is byte-identical to the CLI ROM");
   }
 } finally {
   await browser.close();

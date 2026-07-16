@@ -115,22 +115,34 @@ await cp(path.join(GBALUA, "assets", "soundbank.bin"), path.join(OUT, "sdk", "so
 
 // ---- 4b. the SDK's example games (the gallery) --------------------------------
 // gbalua's exports map doesn't expose ./examples/*, so bundle them here instead
-// of deep-importing through the package.
+// of deep-importing through the package. Each example's asset files (the same
+// ones the SDK's CI passes as --sheet/--mode7) are staged as raw files so the
+// browser build uses the REAL art, not the fallback — the asset mapping below
+// mirrors gba_lua_sdk/.github/workflows/ci.yml.
 const EXAMPLES = [
-  ["hello", "hello", false],
-  ["effects", "effects (blend + fade)", false],
-  ["anim", "anim helpers", true],
-  ["hwtest", "hwtest (save + timer + raster)", false],
-  ["showcase", "showcase (scene tour)", true],
-  ["starfall", "starfall (shmup)", true],
+  ["hello", "hello", {}],
+  ["effects", "effects (blend + fade)", {}],
+  ["anim", "anim helpers", {}],
+  ["hwtest", "hwtest (save + timer + raster)", {}],
+  ["mode7", "mode7 (affine plane)", { mode7: "plane.png" }],
+  ["windows", "windows (hw spotlight)", { mode7: "plane.png" }],
+  ["showcase", "showcase (scene tour)", { mode7: "plane.png" }],
+  ["starfall", "starfall (shmup)", { sheet: "shmup_sheet.png" }],
 ];
 const examples = [];
 for (const [id, name, assets] of EXAMPLES) {
   const p = path.join(GBALUA, "examples", id, "main.lua");
   if (!existsSync(p)) continue;
+  for (const file of Object.values(assets)) {
+    await mkdir(path.join(OUT, "examples", id), { recursive: true });
+    await cp(path.join(GBALUA, "examples", id, file), path.join(OUT, "examples", id, file));
+  }
   examples.push({ id, name, assets, source: await readFile(p, "utf8") });
 }
 await writeFile(path.join(OUT, "examples.json"), JSON.stringify(examples));
+
+// ---- 4c. the SDK cheatsheet (rendered in the help pane) ------------------------
+await cp(path.join(GBALUA, "docs", "CHEATSHEET.md"), path.join(OUT, "cheatsheet.md"));
 
 // ---- 5. manifest (toolchain signature for cache versioning) -------------------
 import { createHash } from "node:crypto";

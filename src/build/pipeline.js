@@ -10,12 +10,19 @@
 //   5. ld                        .o's + libtonc.a (+libmm.a) + libc/libgcc -> ELF
 //   6. objcopy -O binary         ELF -> .gba
 //
-// Assets note (v1): browser builds use the built-in fallback sprite — the
-// PNG->tile converter needs the SDK's A2 (browser-safe png-tiles) before
-// --sheet/--map/--mode7 equivalents work here. Sound DOES work: the staged
-// default soundbank links when a game calls music()/sfx().
+// Assets: the browser equivalent of the CLI's --sheet/--map/--mode7/--music.
+// The header + soundbank generation is the SDK's OWN browser-safe code
+// (gbalua/compiler/asset-headers.mjs + soundbank.mjs), so the generated text —
+// and therefore the ROM bytes — is identical to a CLI build with the same
+// files. Sound: the staged default soundbank links when a game calls
+// music()/sfx(); custom tracker modules replace it.
 
 import { compile, formatDiagnostics } from "gbalua/compiler/index.js";
+import {
+  sheetAssetsHeader, mapAssetHeader, mode7AssetHeader,
+  alienAssetsHeader, mapStubHeader, mode7StubHeader,
+} from "gbalua/compiler/asset-headers.mjs";
+import { buildSoundbank } from "gbalua/compiler/soundbank.mjs";
 import { runTool } from "./arm-tools.js";
 
 // argv fragments copied from romdevtools (arm config + gba-c defaults).
@@ -45,19 +52,6 @@ const SOUNDBANK_STUB = `
         soundbank_bin_size:
           .word soundbank_bin_end - soundbank_bin
       `;
-
-// the fallback gba_assets.h (no custom sheet in browser builds yet).
-const ALIEN_ASSETS_H = `// browser build: built-in alien sprite (custom sheets need SDK A2)
-#ifndef GBA_ASSETS_H
-#define GBA_ASSETS_H
-#include "alien_sprite.h"
-#define GBA_SHEET_TILES alien_tiles
-#define GBA_SHEET_TILES_WORDS (sizeof(alien_tiles)/4)
-#define GBA_SHEET_HAS_PAL 0
-#endif
-`;
-const MAP_STUB_H = `#ifndef GBA_MAP_ASSET_H\n#define GBA_MAP_ASSET_H\n#define GBA_HAS_MAP 0\n#endif\n`;
-const MODE7_STUB_H = `#ifndef GBA_MODE7_ASSET_H\n#define GBA_MODE7_ASSET_H\n#define GBA_HAS_MODE7 0\n#endif\n`;
 
 // ---- static payloads (fetched once, cached for the worker's life) -----------
 let staticsPromise = null;
@@ -93,11 +87,18 @@ function mountHeaders(into, group) {
 
 /**
  * Build a gbalua game.
- * @param {{source:string, onProgress?:(msg:string)=>void}} args
+ * @param {{source:string,
+ *   assets?: {sheet?: {name:string, bytes:Uint8Array},
+ *             map?: {name:string, bytes:Uint8Array},
+ *             mode7?: {name:string, bytes:Uint8Array},
+ *             music?: Array<{name:string, bytes:Uint8Array}>},
+ *   onProgress?:(msg:string)=>void}} args
+ *   asset bytes are PNGs (the UI normalizes .ase/.tmx imports to PNG first,
+ *   exactly like the CLI does); music entries are raw tracker modules.
  * @returns {Promise<{ok:boolean, rom:Uint8Array|null, log:string,
  *   diagnostics:Array<{line:number,col:number,severity:string,message:string}>}>}
  */
-export async function buildRom({ source, onProgress = () => {} }) {
+export async function buildRom({ source, assets = {}, onProgress = () => {} }) {
   let log = "";
   const note = (m) => { log += m + "\n"; onProgress(m); };
 
@@ -136,9 +137,29 @@ export async function buildRom({ source, onProgress = () => {} }) {
   const includes = { ...st.sdk.includes };
   includes["gba_config.h"] =
     `#ifndef GBA_CONFIG_H\n#define GBA_CONFIG_H\n${usesSound ? "#define GBA_HAVE_SOUND 1\n" : ""}#endif\n`;
-  includes["gba_assets.h"] = ALIEN_ASSETS_H;
-  includes["gba_map_asset.h"] = MAP_STUB_H;
-  includes["gba_mode7_asset.h"] = MODE7_STUB_H;
+  // asset headers: the SDK's own generators (same text as a CLI --sheet/... build)
+  try {
+    includes["gba_assets.h"] = assets.sheet
+      ? sheetAssetsHeader(assets.sheet.bytes, assets.sheet.name, "sheet") : alienAssetsHeader();
+    includes["gba_map_asset.h"] = assets.map
+      ? mapAssetHeader(assets.map.bytes, assets.map.name) : mapStubHeader();
+    includes["gba_mode7_asset.h"] = assets.mode7
+      ? mode7AssetHeader(assets.mode7.bytes, assets.mode7.name) : mode7StubHeader();
+  } catch (e) {
+    return { ok: false, rom: null, log: `asset conversion failed: ${e?.message ?? e}\n`, diagnostics: res.diagnostics };
+  }
+
+  // custom music: compile the tracker modules into a soundbank (replaces the
+  // staged default). music(n) plays the nth module in list order.
+  let soundbank = st.soundbank;
+  if (usesSound && assets.music?.length) {
+    try {
+      soundbank = buildSoundbank(assets.music).bin;
+      note(`--- soundbank compiled from ${assets.music.map((m) => m.name).join(", ")} ---`);
+    } catch (e) {
+      return { ok: false, rom: null, log: `soundbank build failed: ${e?.message ?? e}\n`, diagnostics: res.diagnostics };
+    }
+  }
 
   // header set mounted for every cc1 run (sys + tonc + maxmod + generated)
   const cc1Headers = {};
@@ -185,7 +206,7 @@ export async function buildRom({ source, onProgress = () => {} }) {
     if (usesSound) {
       note("--- soundbank stub auto-emitted (.incbin) ---");
       objects["soundbank.o"] = await assemble("soundbank.s", SOUNDBANK_STUB,
-        { "/work/soundbank.bin": st.soundbank });
+        { "/work/soundbank.bin": soundbank });
     }
 
     // ── 5. link ─────────────────────────────────────────────────────────────

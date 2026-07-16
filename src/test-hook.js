@@ -7,9 +7,15 @@ import { MgbaHost } from "./emu/mgba-host.js";
 
 export function installTestHook() {
   window.__gbaluaWeb = {
-    /** build source -> { ok, romBase64, log } (base64 crosses page.evaluate cleanly) */
-    async build(source) {
-      const r = await build(source);
+    /** build source (+ optional assets, bytes as base64) -> { ok, romBase64, log } */
+    async build(source, assetsB64) {
+      const un = (p) => p && { name: p.name, bytes: Uint8Array.from(atob(p.b64), (c) => c.charCodeAt(0)) };
+      const assets = {};
+      if (assetsB64?.sheet) assets.sheet = un(assetsB64.sheet);
+      if (assetsB64?.map) assets.map = un(assetsB64.map);
+      if (assetsB64?.mode7) assets.mode7 = un(assetsB64.mode7);
+      if (assetsB64?.music?.length) assets.music = assetsB64.music.map(un);
+      const r = await build(source, { assets });
       let romBase64 = null;
       if (r.ok && r.rom) {
         let s = "";

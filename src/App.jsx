@@ -1,14 +1,20 @@
-// App — the gbalua web IDE shell: examples picker | Monaco editor | emulator.
-// Build & Run compiles the editor buffer in the build worker (the real WASM
-// arm-gcc toolchain) and boots the ROM on the mGBA core. Edits persist to
-// localStorage per example slot; Download saves the built .gba.
+// App — the gbalua web IDE shell: examples picker | editor + assets | emulator.
+// Build & Run compiles the editor buffer + assets in the build worker (the
+// real WASM arm-gcc toolchain) and boots the ROM on the mGBA core. Edits and
+// assets persist to localStorage per example slot; Download saves the built
+// .gba; zip export/import moves whole projects.
 import { useState, useRef, useCallback, useEffect } from "react";
 import Editor from "./Editor.jsx";
 import EmulatorPane from "./emu/EmulatorPane.jsx";
+import AssetsPane from "./assets/AssetsPane.jsx";
+import CheatsheetPane from "./CheatsheetPane.jsx";
 import { build } from "./build/build-client.js";
-import { loadExamples } from "./examples.js";
+import { loadExamples, loadExampleAssets } from "./examples.js";
+import { saveAssets, loadAssets, clearAssets } from "./assets/asset-store.js";
+import { zipWrite, zipRead } from "./zip.js";
 
 const LS_KEY = "gbalua-web:";
+const LS_ASSETS = "gbalua-web-assets:";
 
 function loadSource(id, fallback) {
   try { return localStorage.getItem(LS_KEY + id) ?? fallback; } catch { return fallback; }
@@ -18,30 +24,38 @@ export default function App() {
   const [examples, setExamples] = useState(null);
   const [exampleId, setExampleId] = useState("hello");
   const [source, setSource] = useState("");
+  const [assets, setAssets] = useState({});
   const [rom, setRom] = useState(null);
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState("");
   const [progress, setProgress] = useState("");
+  const [view, setView] = useState("code");        // code | assets
+  const [showCheat, setShowCheat] = useState(false);
   const saveTimer = useRef(0);
+
+  // load a slot: saved source/assets, else the example's own
+  const loadSlot = useCallback(async (ex) => {
+    setExampleId(ex.id);
+    setSource(loadSource(ex.id, ex.source));
+    const saved = loadAssets(LS_ASSETS + ex.id);
+    if (saved) { setAssets(saved); return; }
+    try { setAssets(await loadExampleAssets(ex)); }
+    catch { setAssets({}); }
+  }, []);
 
   useEffect(() => {
     loadExamples().then((exs) => {
       setExamples(exs);
-      const first = exs[0];
-      if (first) {
-        setExampleId(first.id);
-        setSource(loadSource(first.id, first.source));
-      }
+      if (exs[0]) loadSlot(exs[0]);
     }).catch((e) => setProgress(`failed to load examples: ${e.message}`));
-  }, []);
+  }, [loadSlot]);
 
   const pick = useCallback((id) => {
     const ex = examples?.find((e) => e.id === id);
     if (!ex) return;
-    setExampleId(id);
-    setSource(loadSource(id, ex.source));
+    loadSlot(ex);
     setLog("");
-  }, [examples]);
+  }, [examples, loadSlot]);
 
   const onChange = useCallback((v) => {
     setSource(v);
@@ -52,19 +66,25 @@ export default function App() {
     }, 500);
   }, [exampleId]);
 
-  const revert = useCallback(() => {
+  const onAssetsChange = useCallback((next) => {
+    setAssets(next);
+    saveAssets(LS_ASSETS + exampleId, next);
+  }, [exampleId]);
+
+  const revert = useCallback(async () => {
     const ex = examples?.find((e) => e.id === exampleId);
     if (!ex) return;
     try { localStorage.removeItem(LS_KEY + exampleId); } catch { /* ignore */ }
-    setSource(ex.source);
-  }, [examples, exampleId]);
+    clearAssets(LS_ASSETS + exampleId);
+    await loadSlot(ex);
+  }, [examples, exampleId, loadSlot]);
 
   const doBuild = useCallback(async () => {
     setBusy(true);
     setLog("");
     setProgress("starting build…");
     try {
-      const r = await build(source, { onProgress: setProgress });
+      const r = await build(source, { assets, onProgress: setProgress });
       setLog(r.log || "");
       if (r.ok && r.rom) {
         setRom(r.rom);
@@ -78,7 +98,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [source]);
+  }, [source, assets]);
 
   const download = useCallback(() => {
     if (!rom) return;
@@ -88,6 +108,52 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(a.href);
   }, [rom, exampleId]);
+
+  // ---- project zip: main.lua + assets in a plain zip, nothing invented ------
+  const exportZip = useCallback(() => {
+    const files = { "main.lua": new TextEncoder().encode(source) };
+    if (assets.sheet) files[`sheet/${assets.sheet.name}`] = assets.sheet.bytes;
+    if (assets.map) files[`map/${assets.map.name}`] = assets.map.bytes;
+    if (assets.mode7) files[`mode7/${assets.mode7.name}`] = assets.mode7.bytes;
+    for (const [i, m] of (assets.music ?? []).entries()) {
+      files[`music/${String(i).padStart(2, "0")}-${m.name}`] = m.bytes;
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([zipWrite(files)], { type: "application/zip" }));
+    a.download = `${exampleId}.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [source, assets, exampleId]);
+
+  const importZip = useCallback(async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      const entries = zipRead(new Uint8Array(await f.arrayBuffer()));
+      const luaName = Object.keys(entries).find((n) => n.endsWith("main.lua")) ??
+        Object.keys(entries).find((n) => n.endsWith(".lua"));
+      if (!luaName) throw new Error("zip has no .lua source");
+      const next = {};
+      const music = [];
+      for (const [name, bytes] of Object.entries(entries)) {
+        const base = name.split("/").pop();
+        if (name.startsWith("sheet/")) next.sheet = { name: base, bytes };
+        else if (name.startsWith("map/")) next.map = { name: base, bytes };
+        else if (name.startsWith("mode7/")) next.mode7 = { name: base, bytes };
+        else if (name.startsWith("music/")) music.push({ name: base.replace(/^\d+-/, ""), bytes });
+      }
+      if (music.length) next.music = music;
+      const text = new TextDecoder().decode(entries[luaName]);
+      setSource(text);
+      setAssets(next);
+      try { localStorage.setItem(LS_KEY + exampleId, text); } catch { /* full */ }
+      saveAssets(LS_ASSETS + exampleId, next);
+      setProgress(`imported ${f.name}`);
+    } catch (err) {
+      setProgress(`zip import failed: ${err?.message ?? err}`);
+    }
+  }, [exampleId]);
 
   // Ctrl/Cmd+Enter builds
   useEffect(() => {
@@ -102,7 +168,7 @@ export default function App() {
     return <div className="app"><div style={{ padding: 24, color: "#9aa3b5" }}>{progress || "loading…"}</div></div>;
   }
 
-  const ex = examples.find((e) => e.id === exampleId);
+  const assetCount = ["sheet", "map", "mode7"].filter((k) => assets[k]).length + (assets.music?.length ?? 0);
 
   return (
     <div className="app">
@@ -111,30 +177,38 @@ export default function App() {
         <select value={exampleId} onChange={(e) => pick(e.target.value)}>
           {examples.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
         </select>
-        <button onClick={revert} title="discard local edits for this example">revert</button>
+        <button onClick={revert} title="discard local edits + assets for this example">revert</button>
+        <div className="view-tabs">
+          <button className={view === "code" ? "active" : ""} onClick={() => setView("code")}>code</button>
+          <button className={view === "assets" ? "active" : ""} onClick={() => setView("assets")}>
+            assets{assetCount ? ` (${assetCount})` : ""}
+          </button>
+        </div>
+        <button onClick={() => setShowCheat((v) => !v)}>cheatsheet</button>
         <span style={{ flex: 1 }} />
         <span className="progress">{progress}</span>
         <button className="primary" onClick={doBuild} disabled={busy}>
           {busy ? "building…" : "Build & Run  (Ctrl+Enter)"}
         </button>
         <button onClick={download} disabled={!rom}>download .gba</button>
+        <button onClick={exportZip}>export .zip</button>
+        <label className="import-btn as-button">
+          import .zip<input type="file" accept=".zip" onChange={importZip} />
+        </label>
       </header>
-
-      {ex?.assets && (
-        <div className="notice">
-          this example ships custom art in the SDK — browser builds use the fallback
-          sprite until browser asset conversion lands, so it will look different here.
-        </div>
-      )}
 
       <div className="columns">
         <div className="editor-col">
-          <Editor value={source} onChange={onChange} />
+          <div style={{ display: view === "code" ? "contents" : "none" }}>
+            <Editor value={source} onChange={onChange} />
+          </div>
+          {view === "assets" && <AssetsPane assets={assets} onChange={onAssetsChange} />}
         </div>
         <div className="emu-col">
           <EmulatorPane rom={rom} />
           <pre className="build-log">{log}</pre>
         </div>
+        {showCheat && <CheatsheetPane onClose={() => setShowCheat(false)} />}
       </div>
     </div>
   );

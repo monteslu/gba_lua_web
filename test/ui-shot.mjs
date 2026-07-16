@@ -15,7 +15,18 @@ await page.waitForTimeout(2500);  // monaco paint
 await page.click("button.primary");
 await page.waitForFunction(() => document.querySelector(".progress")?.textContent?.includes("built"), { timeout: 180000 });
 await page.waitForTimeout(1500);  // let the emu draw a few frames
-await page.screenshot({ path: process.env.SCRATCH ? process.env.SCRATCH + "/ui.png" : "ui-shot.png" });
+const dir = process.env.SCRATCH || ".";
+await page.screenshot({ path: dir + "/ui.png" });
+// second shot: the assets view (starfall has a real sheet to show)
+await page.selectOption("select", "starfall");
+await page.waitForTimeout(800);
+await page.click(".view-tabs button:nth-child(2)");
+await page.waitForTimeout(800);
+await page.screenshot({ path: dir + "/ui-assets.png" });
+// third shot: the cheatsheet drawer
+await page.click("text=cheatsheet");
+await page.waitForTimeout(800);
+await page.screenshot({ path: dir + "/ui-cheatsheet.png" });
 await browser.close();
 try { process.kill(-vite.pid, "SIGTERM"); } catch { vite.kill(); }
 console.log("ui screenshot saved");
