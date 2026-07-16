@@ -1,21 +1,19 @@
 // pipeline.js — the browser GBA build: Lua source -> .gba ROM, entirely
-// in-worker. Mirrors the exact stage graph + argv of romdevtools'
-// buildWithLibtonc() (the pipeline the gbalua CLI runs in-process), so the
-// ROM bytes are byte-identical to a CLI build of the same source:
+// in-worker, through THE canonical build driver:
 //
-//   1. gbalua compile()          Lua -> C (pure JS, runs right here)
-//   2. cc1-arm  (per .c)         C -> ARM asm      (thumb-interwork)
-//   3. as       (per .s)         asm -> .o
-//   4. as gba_crt0.s + stubs     runtime objects
-//   5. ld                        .o's + libtonc.a (+libmm.a) + libc/libgcc -> ELF
-//   6. objcopy -O binary         ELF -> .gba
+//   1. gbalua compile()                  Lua -> C (pure JS, runs right here)
+//   2. buildGbaC() from romdev-platform-gba  C -> .gba, with every seam
+//      injected (env.runTool / env.share / env.hash) so the IDENTICAL
+//      pipeline the gbalua CLI and the romdev server run executes against
+//      our staged WASM + share manifest. No hand-mirrored argv, no copied
+//      stage graph — byte-identity with the CLI is by construction (and
+//      still enforced by the playwright gates).
 //
 // Assets: the browser equivalent of the CLI's --sheet/--map/--mode7/--music.
 // The header + soundbank generation is the SDK's OWN browser-safe code
 // (gbalua/compiler/asset-headers.mjs + soundbank.mjs), so the generated text —
 // and therefore the ROM bytes — is identical to a CLI build with the same
-// files. Sound: the staged default soundbank links when a game calls
-// music()/sfx(); custom tracker modules replace it.
+// files.
 
 import { compile, formatDiagnostics } from "gbalua/compiler/index.js";
 import {
@@ -23,35 +21,9 @@ import {
   alienAssetsHeader, mapStubHeader, mode7StubHeader,
 } from "gbalua/compiler/asset-headers.mjs";
 import { buildSoundbank } from "gbalua/compiler/soundbank.mjs";
-import { runTool } from "./arm-tools.js";
-
-// argv fragments copied from romdevtools (arm config + gba-c defaults).
-const ARM_FLAGS = ["-mcpu=arm7tdmi", "-mthumb-interwork"];
-const CC1_DEFAULTS = ["-O2", "-mthumb", "-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra", "-Wno-unused-parameter"];
-
-const FAKE_HEAP_STUB = `
-      .section .data
-      .global fake_heap_end
-      .global end
-      .align 2
-      fake_heap_end:
-        .word 0x02040000   /* end of EWRAM — 256 KB after 0x02000000 */
-      end:
-        .word 0x02000000   /* start of EWRAM — sbrk grows from here */
-    `;
-
-const SOUNDBANK_STUB = `
-        .section .rodata
-        .align 2
-        .global soundbank_bin
-        .global soundbank_bin_size
-        soundbank_bin:
-          .incbin "soundbank.bin"
-        soundbank_bin_end:
-        .align 2
-        soundbank_bin_size:
-          .word soundbank_bin_end - soundbank_bin
-      `;
+import { buildGbaC } from "romdev-platform-gba/build/gba-c/gba-c.js";
+import { parseBuildLog } from "romdev-platform-gba/build/parse-errors.js";
+import { runToolJob } from "./arm-tools.js";
 
 // ---- static payloads (fetched once, cached for the worker's life) -----------
 let staticsPromise = null;
@@ -60,30 +32,43 @@ async function loadStatics() {
   staticsPromise = (async () => {
     const json = (u) => fetch(u).then((r) => { if (!r.ok) throw new Error(`fetch ${u}: ${r.status}`); return r.json(); });
     const bin = (u) => fetch(u).then((r) => { if (!r.ok) throw new Error(`fetch ${u}: ${r.status}`); return r.arrayBuffer(); }).then((b) => new Uint8Array(b));
-    const [share, sdk, soundbank, ...bins] = await Promise.all([
-      json("/gba/share/headers.json"),
+    const [sdk, soundbank, shareEntries] = await Promise.all([
       json("/gba/sdk/sdk.json"),
       bin("/gba/sdk/soundbank.bin"),
-      bin("/gba/share/libtonc.a"),
-      bin("/gba/share/libmm.a"),
-      bin("/gba/share/crti.o"),
-      bin("/gba/share/crtn.o"),
-      bin("/gba/share/crtbegin.o"),
-      bin("/gba/share/crtend.o"),
-      bin("/gba/share/libc.a"),
-      bin("/gba/share/libgcc.a"),
-      bin("/gba/share/libnosys.a"),
+      json("/gba/share/share-manifest.json"),
     ]);
-    const [libtonc, libmm, crti, crtn, crtbegin, crtend, libc, libgcc, libnosys] = bins;
-    return { share, sdk, soundbank, libtonc, libmm, crti, crtn, crtbegin, crtend, libc, libgcc, libnosys };
+    // rebuild the share manifest IN STAGED ORDER — key order feeds SDK compile
+    // order -> ar member order -> ROM bytes (per the romdev reply).
+    const share = {};
+    for (const [rel, kind, data] of shareEntries) {
+      share[rel] = kind === "t" ? data : Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    }
+    return { sdk, soundbank, share };
   })();
   return staticsPromise;
 }
 
-// mount a {name:text} header group under /work/
-function mountHeaders(into, group) {
-  for (const [name, text] of Object.entries(group)) into[`/work/${name}`] = text;
+// env.hash — the canonical source-map digest (sorted keys, NUL-delimited),
+// mirroring sdk-cache.js hashSources, via crypto.subtle.
+async function subtleHash(srcMap) {
+  const enc = new TextEncoder();
+  const toBytes = (v) => (typeof v === "string" ? enc.encode(v) : v instanceof Uint8Array ? v : new Uint8Array(v));
+  const NUL = new Uint8Array([0]);
+  const chunks = [];
+  for (const name of Object.keys(srcMap).sort()) {
+    chunks.push(toBytes(name), NUL, toBytes(srcMap[name]), NUL);
+  }
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const all = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  const digest = await crypto.subtle.digest("SHA-256", all);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+// warm rebuild cache for the worker's lifetime (SDK seed archives etc.)
+const sdkCache = new Map();
 
 /**
  * Build a gbalua game.
@@ -137,6 +122,7 @@ export async function buildRom({ source, assets = {}, onProgress = () => {} }) {
   const includes = { ...st.sdk.includes };
   includes["gba_config.h"] =
     `#ifndef GBA_CONFIG_H\n#define GBA_CONFIG_H\n${usesSound ? "#define GBA_HAVE_SOUND 1\n" : ""}#endif\n`;
+
   // asset headers: the SDK's own generators (same text as a CLI --sheet/... build)
   try {
     includes["gba_assets.h"] = assets.sheet
@@ -161,103 +147,32 @@ export async function buildRom({ source, assets = {}, onProgress = () => {} }) {
     }
   }
 
-  // header set mounted for every cc1 run (sys + tonc + maxmod + generated)
-  const cc1Headers = {};
-  mountHeaders(cc1Headers, st.share.sys);
-  mountHeaders(cc1Headers, st.share.tonc);
-  if (usesSound) mountHeaders(cc1Headers, st.share.maxmod);
-  mountHeaders(cc1Headers, includes);
+  const binaryIncludes = {};
+  if (usesSound) binaryIncludes["soundbank.bin"] = soundbank;
 
-  const cc1Argv = [
-    ...ARM_FLAGS, ...CC1_DEFAULTS, "-mthumb-interwork",
-    "-iquote", "/work", "-I", "/work",
-    "/work/main.c", "-o", "/work/main.s",
-  ];
-  const asArgv = [...ARM_FLAGS, "-I", "/work", "/work/main.s", "-o", "/work/main.o"];
-
-  async function assemble(label, asmText, extraBin = {}) {
-    const r = await runTool("arm-none-eabi-as", asArgv,
-      { "/work/main.s": asmText, ...extraBin }, ["/work/main.o"]);
-    log += r.log;
-    if (r.exitCode !== 0 || !r.outputs["/work/main.o"]) throw new Error(`as (${label}) failed`);
-    return r.outputs["/work/main.o"];
-  }
-
-  const objects = {};
+  // ── 3. C -> .gba through the canonical driver, env-injected ───────────────
+  onProgress("building ROM (arm-gcc WASM)");
   try {
-    // ── 3. cc1 + as per translation unit ────────────────────────────────────
-    for (const [name, src] of Object.entries(sources)) {
-      onProgress(`cc1 ${name}`);
-      const cc1 = await runTool("cc1-arm", cc1Argv,
-        { "/work/main.c": src, ...cc1Headers }, ["/work/main.s"]);
-      log += cc1.log;
-      if (cc1.exitCode !== 0 || !cc1.outputs["/work/main.s"]) {
-        return { ok: false, rom: null, log, diagnostics: res.diagnostics };
-      }
-      onProgress(`as ${name}`);
-      objects[name.replace(/\.c$/, ".o")] =
-        await assemble(name, new TextDecoder().decode(cc1.outputs["/work/main.s"]));
-    }
-
-    // ── 4. runtime objects ──────────────────────────────────────────────────
-    onProgress("as gba_crt0.s");
-    objects["gba_crt0.o"] = await assemble("gba_crt0.s", st.share.crt0);
-    objects["fake_heap_end.o"] = await assemble("fake_heap_end", FAKE_HEAP_STUB);
-    if (usesSound) {
-      note("--- soundbank stub auto-emitted (.incbin) ---");
-      objects["soundbank.o"] = await assemble("soundbank.s", SOUNDBANK_STUB,
-        { "/work/soundbank.bin": soundbank });
-    }
-
-    // ── 5. link ─────────────────────────────────────────────────────────────
-    onProgress("ld");
-    const ldInputs = { "/work/gba.ld": st.share.ldscript };
-    for (const [n, bytes] of Object.entries(objects)) ldInputs[`/work/${n}`] = bytes;
-    ldInputs["/work/libtonc.a"] = st.libtonc;
-    if (usesSound) ldInputs["/work/libmm.a"] = st.libmm;
-    ldInputs["/work/crti.o"] = st.crti;
-    ldInputs["/work/crtn.o"] = st.crtn;
-    ldInputs["/work/crtbegin.o"] = st.crtbegin;
-    ldInputs["/work/crtend.o"] = st.crtend;
-    ldInputs["/work/libc.a"] = st.libc;
-    ldInputs["/work/libgcc.a"] = st.libgcc;
-    ldInputs["/work/libnosys.a"] = st.libnosys;
-
-    const ldArgv = [
-      "-T", "/work/gba.ld",
-      "-o", "/work/main.elf",
-      "-Map=/work/main.map",
-      "-L", "/work",
-      ...Object.keys(objects).map((n) => "/work/" + n),
-      "/work/crti.o",
-      "/work/crtbegin.o",
-      "--start-group",
-      "-ltonc",
-      ...(usesSound ? ["-lmm"] : []),
-      "-lc",
-      "-lgcc",
-      "-lnosys",
-      "--end-group",
-      "/work/crtend.o",
-      "/work/crtn.o",
-    ];
-    const ld = await runTool("arm-none-eabi-ld", ldArgv, ldInputs, ["/work/main.elf", "/work/main.map"]);
-    log += ld.log;
-    if (ld.exitCode !== 0 || !ld.outputs["/work/main.elf"]) {
+    const r = await buildGbaC({
+      sources, headers: includes, binaryIncludes,
+      runtime: "libtonc", maxmod: usesSound,
+      env: {
+        runTool: async (job) => {
+          onProgress(`${job.tool} ${job.argv?.find((a) => a.endsWith(".c") || a.endsWith(".s")) ?? ""}`.trim());
+          return runToolJob(job);
+        },
+        share: st.share,
+        hash: subtleHash,
+        sdkCache: { get: (k) => sdkCache.get(k) ?? null, put: (k, b) => sdkCache.set(k, b) },
+      },
+    });
+    log += r.log || "";
+    if (!r.ok || !r.binary) {
+      const issues = parseBuildLog(r.log || "");
+      for (const iss of issues) log += `\n${iss.severity ?? "error"}: ${iss.file ?? ""}:${iss.line ?? ""} ${iss.message}`;
       return { ok: false, rom: null, log, diagnostics: res.diagnostics };
     }
-
-    // ── 6. objcopy -> .gba ──────────────────────────────────────────────────
-    onProgress("objcopy");
-    const oc = await runTool("arm-none-eabi-objcopy",
-      ["-O", "binary", "/work/main.elf", "/work/main.gba"],
-      { "/work/main.elf": ld.outputs["/work/main.elf"] }, ["/work/main.gba"]);
-    log += oc.log;
-    if (oc.exitCode !== 0 || !oc.outputs["/work/main.gba"]) {
-      return { ok: false, rom: null, log, diagnostics: res.diagnostics };
-    }
-
-    return { ok: true, rom: oc.outputs["/work/main.gba"], log, diagnostics: res.diagnostics };
+    return { ok: true, rom: r.binary, log, diagnostics: res.diagnostics };
   } catch (e) {
     return { ok: false, rom: null, log: log + `\n${e?.message ?? e}\n`, diagnostics: res.diagnostics };
   }

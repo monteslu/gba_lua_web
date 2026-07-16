@@ -2,20 +2,21 @@
 // so Vite serves them to the browser. Everything comes from npm packages the
 // `gbalua` dependency pulls in — no checkouts, no servers:
 //   romdev-platform-gba  -> cc1-arm / as / ld / objcopy WASM + the mGBA core
-//   romdevtools          -> libtonc/maxmod headers, prebuilt .a seeds, crt
-//                           objects, gba_crt0.s, gba_cart.ld, arm archives
+//                           + the share/gba/lib tree (libtonc, maxmod, crt,
+//                           ld scripts, arm archives) + THE build driver
 //   gbalua               -> the gba-sdk/*.c runtime sources + soundbank.bin
 //
-// Text assets (headers, runtime sources, crt0, ld script) are bundled into two
-// JSON files (share/headers.json, sdk/sdk.json) so the build worker fetches a
-// handful of files instead of hundreds. Binaries stay as raw files.
+// The share tree is staged as ONE manifest (share-manifest.json) built by the
+// package's own buildShareManifest() — the exact walk order node uses, which
+// matters: key order feeds SDK compile order -> ar member order -> ROM bytes.
+// The build worker hands it to buildGbaC() as env.share.
 //
 // public/gba is gitignored — regenerate any time (postinstall runs this).
 import { cp, mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const require = createRequire(import.meta.url);
@@ -35,8 +36,6 @@ function resolvePkgDir(pkg, sentinel) {
 }
 
 const PLATFORM = resolvePkgDir("romdev-platform-gba", "wasm/cc1-arm.wasm");
-const TOOLS = resolvePkgDir("romdevtools", "src/platforms/gba/lib/libtonc/gba_cart.ld");
-const LIB = path.join(TOOLS, "src", "platforms", "gba", "lib");
 
 const OUT = path.join(HERE, "public", "gba");
 await rm(OUT, { recursive: true, force: true });
@@ -56,51 +55,21 @@ for (const f of WASM_FILES) {
   await cp(path.join(PLATFORM, "wasm", f), path.join(OUT, "wasm", f));
 }
 
-// ---- 2. headers (bundled as one JSON) ----------------------------------------
-// Groups mirror what romdev's gba-c pipeline mounts for cc1: newlib sysinclude,
-// libtonc's include tree, maxmod's include. Plus the crt0 + linker script text.
-async function readTree(dir, filter = /\.(h|inc)$/i) {
-  const out = {};
-  async function walk(d, rel = "") {
-    let entries;
-    try { entries = await readdir(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const full = path.join(d, e.name);
-      const sub = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) await walk(full, sub);
-      else if (e.isFile() && filter.test(e.name)) out[sub] = await readFile(full, "utf8");
-    }
-  }
-  await walk(dir);
-  return out;
+// ---- 2. the share tree, as the package's own manifest -------------------------
+// buildShareManifest() classifies text vs binary and walks in the canonical
+// order. Serialized as an ORDERED array (JSON objects would survive, but be
+// explicit): [[relPath, "t", text] | [relPath, "b", base64]].
+const { buildShareManifest } = await import(
+  pathToFileURL(path.join(PLATFORM, "build", "common", "share-fs.js")).href
+);
+const manifest = await buildShareManifest(path.join(PLATFORM, "share", "gba", "lib"));
+const entries = [];
+for (const [rel, data] of Object.entries(manifest)) {
+  entries.push(typeof data === "string"
+    ? [rel, "t", data]
+    : [rel, "b", Buffer.from(data).toString("base64")]);
 }
-
-const headers = {
-  sys: await readTree(path.join(LIB, "libgba", "sysinclude")),
-  tonc: await readTree(path.join(LIB, "libtonc", "include")),
-  maxmod: await readTree(path.join(LIB, "maxmod", "include")),
-  crt0: await readFile(path.join(LIB, "libtonc", "gba_crt0.s"), "utf8"),
-  ldscript: await readFile(path.join(LIB, "libtonc", "gba_cart.ld"), "utf8"),
-};
-await writeFile(path.join(OUT, "share", "headers.json"), JSON.stringify(headers));
-
-// ---- 3. link-stage binaries ---------------------------------------------------
-// Prebuilt SDK seeds (mounted as libtonc.a / libmm.a at link time), the crt
-// objects, and the gcc/newlib target archives.
-const BIN = [
-  [path.join(LIB, "libtonc", "libtonc.seed.a"), "libtonc.a"],
-  [path.join(LIB, "maxmod", "maxmod.seed.a"), "libmm.a"],
-  [path.join(LIB, "libtonc", "crti.o"), "crti.o"],
-  [path.join(LIB, "libtonc", "crtn.o"), "crtn.o"],
-  [path.join(LIB, "libtonc", "crtbegin.o"), "crtbegin.o"],
-  [path.join(LIB, "libtonc", "crtend.o"), "crtend.o"],
-  [path.join(LIB, "arm-archives", "libc.a"), "libc.a"],
-  [path.join(LIB, "arm-archives", "libgcc.a"), "libgcc.a"],
-  [path.join(LIB, "arm-archives", "libnosys.a"), "libnosys.a"],
-];
-for (const [src, name] of BIN) {
-  await cp(src, path.join(OUT, "share", name));
-}
+await writeFile(path.join(OUT, "share", "share-manifest.json"), JSON.stringify(entries));
 
 // ---- 4. the gbalua runtime (C sources + headers) + default soundbank ----------
 const SDK_SRC = path.join(GBALUA, "gba-sdk");

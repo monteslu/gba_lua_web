@@ -67,6 +67,42 @@ function ensureDirs(FS, filePath) {
   }
 }
 
+// base64 <-> bytes (workers have atob/btoa)
+const b64ToBytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+function bytesToB64(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+/**
+ * env.runTool for buildGbaC — executes one ToolJob (the driver marshals argv +
+ * files; we own WASM instantiation + MEMFS). Contract matches the node worker
+ * pool: each output comes back in ITS declared encoding — utf8 outputs as
+ * text, base64 outputs as base64 (getOutputText reads the value verbatim).
+ * @param {{glueFile:string, argv:string[],
+ *   inputFiles:Array<{vfsPath:string, encoding:"utf8"|"base64", data:string}>,
+ *   outputFiles:Array<{vfsPath:string, encoding:"utf8"|"base64"}>}} job
+ * @returns {Promise<{exitCode:number, log:string, outputs:Record<string,string>}>}
+ */
+export async function runToolJob(job) {
+  const inputs = {};
+  for (const f of job.inputFiles ?? []) {
+    inputs[f.vfsPath] = f.encoding === "base64" ? b64ToBytes(f.data) : f.data;
+  }
+  const outFiles = job.outputFiles ?? [];
+  const r = await runTool(job.glueFile.replace(/\.mjs$/, ""), job.argv, inputs, outFiles.map((f) => f.vfsPath));
+  const outputs = {};
+  for (const f of outFiles) {
+    const bytes = r.outputs[f.vfsPath];
+    if (!bytes) { outputs[f.vfsPath] = ""; continue; }
+    outputs[f.vfsPath] = f.encoding === "base64" ? bytesToB64(bytes) : new TextDecoder().decode(bytes);
+  }
+  return { exitCode: r.exitCode, log: r.log, outputs };
+}
+
 /**
  * Run one tool.
  * @param {string} name  tool basename, e.g. "cc1-arm"
