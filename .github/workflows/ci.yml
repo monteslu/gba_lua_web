@@ -1,0 +1,35 @@
+# CI: the IDE must build and pass its browser gates from a fresh checkout with
+# registry deps only. Includes the GameTank tripwire — this repo must never
+# accumulate GameTank residue (the lesson from the SDK cleanup, automated).
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GameTank tripwire (this is a GBA project)
+        run: |
+          if grep -rniE "gametank|\.gtg\b|\.gtm2\b|\.gsi\b" src/ scripts/ test/ index.html README.md 2>/dev/null; then
+            echo "GameTank residue found — this repo must stay GBA-only"; exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci        # postinstall stages the toolchain into public/gba
+
+      - name: vite production build
+        run: npm run build
+
+      - name: install chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: browser gates (byte-identical build + emulator boot smoke)
+        run: npm test

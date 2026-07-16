@@ -1,0 +1,29 @@
+{
+  "name": "gba_lua_web",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Web IDE for gbalua: write Game Boy Advance games in Lua, build and play in the browser.",
+  "license": "MIT",
+  "author": "Luis Montes",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "postinstall": "node scripts/stage-toolchain.mjs",
+    "stage": "node scripts/stage-toolchain.mjs",
+    "test": "node test/browser-build.mjs"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "gbalua": "^0.1.0",
+    "monaco-editor": "^0.55.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "playwright": "^1.61.1",
+    "vite": "^6.0.7"
+  }
+}

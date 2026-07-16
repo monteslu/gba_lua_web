@@ -1,0 +1,57 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font: 13px/1.4 system-ui, sans-serif;
+  background: #1b1d23;
+  color: #d6d8de;
+}
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: #23262e;
+  border-bottom: 1px solid #101114;
+}
+.brand { font-weight: 700; font-size: 15px; color: #7ec8ff; }
+.brand-dim { color: #5a6274; font-weight: 400; }
+.progress { color: #9aa3b5; font-size: 12px; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+button, select {
+  background: #2d313c; color: #d6d8de;
+  border: 1px solid #3a3f4d; border-radius: 4px;
+  padding: 5px 10px; font-size: 12px; cursor: pointer;
+}
+button:hover:not(:disabled) { background: #394050; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: #2c66a8; border-color: #3a7cc4; }
+button.primary:hover:not(:disabled) { background: #3474bd; }
+
+.notice {
+  padding: 6px 12px; font-size: 12px;
+  background: #3a3320; color: #d8c27a;
+  border-bottom: 1px solid #101114;
+}
+
+.columns { display: flex; flex: 1; min-height: 0; }
+.editor-col { flex: 1.4; min-width: 0; border-right: 1px solid #101114; }
+.emu-col {
+  flex: 1; min-width: 340px; max-width: 480px;
+  display: flex; flex-direction: column;
+  padding: 10px; gap: 8px; overflow-y: auto;
+}
+
+.emu-pane { display: flex; flex-direction: column; gap: 6px; }
+.emu-bar { display: flex; align-items: center; gap: 6px; }
+.emu-status { color: #9aa3b5; font-size: 12px; }
+.emu-help { color: #5a6274; font-size: 11px; }
+
+.build-log {
+  flex: 1; margin: 0; padding: 8px;
+  background: #14161b; border: 1px solid #101114; border-radius: 4px;
+  font: 11px/1.5 ui-monospace, monospace;
+  color: #9aa3b5;
+  white-space: pre-wrap; overflow-y: auto;
+  min-height: 80px;
+}
