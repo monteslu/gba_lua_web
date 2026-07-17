@@ -131,36 +131,48 @@ export function MusicEditor({ song, songName, onChange }) {
 
   const exportXm = () => downloadBytes(`${songName || "song"}.xm`, songToXm(model, songName), "application/octet-stream");
 
-  // live step-clock playback — reads the CURRENT model each step, so edits
-  // and tempo changes take effect on the next step
+  // LOOK-AHEAD playback: all note timing rides the AudioContext clock (never
+  // setTimeout), which is what kills the choppiness. A fast poll schedules any
+  // steps landing inside the look-ahead window; the playhead highlight is fired
+  // by a per-step timer aligned to each step's scheduled audio time. Reads the
+  // CURRENT model each step, so edits + tempo changes take effect on the fly.
   const playRunning = useRef(false);
-  const playTimer = useRef(0);
+  const pollTimer = useRef(0);
+  const LOOKAHEAD = 0.12;   // schedule up to 120ms ahead
   const play = useCallback(() => {
     if (playRunning.current) return;
-    preview.current?.ensure();
+    const synth = preview.current;
+    if (!synth) return;
+    synth.ensure();
     playRunning.current = true;
     setPlaying(true);
     let row = 0;
-    const tick = () => {
+    let nextTime = synth.now() + 0.06;   // small lead-in
+    const poll = () => {
       if (!playRunning.current) return;
       const m = modelRef.current;
       const steps = Math.max(1, m.steps);
-      if (row >= steps) row = 0;
-      setPlayRow(row);
       const stepSec = m.delay / 60;
-      preview.current?.playStep(m.grid[row] || [], m.instruments, Math.max(0.06, stepSec * 0.95));
-      row++;
-      playTimer.current = setTimeout(tick, stepSec * 1000);
+      while (nextTime < synth.now() + LOOKAHEAD) {
+        if (row >= steps) row = 0;
+        synth.scheduleStep(m.grid[row] || [], m.instruments, nextTime, Math.max(0.05, stepSec * 0.92));
+        // move the playhead exactly when this step is heard
+        const hlRow = row;
+        const delayMs = Math.max(0, (nextTime - synth.now()) * 1000);
+        setTimeout(() => { if (playRunning.current) setPlayRow(hlRow); }, delayMs);
+        nextTime += stepSec;
+        row++;
+      }
+      pollTimer.current = setTimeout(poll, 25);
     };
-    clearTimeout(playTimer.current);
-    tick();
+    poll();
   }, []);
   const stop = useCallback(() => {
     playRunning.current = false;
-    clearTimeout(playTimer.current);
+    clearTimeout(pollTimer.current);
     setPlaying(false); setPlayRow(-1);
   }, []);
-  useEffect(() => () => { playRunning.current = false; clearTimeout(playTimer.current); }, []);
+  useEffect(() => () => { playRunning.current = false; clearTimeout(pollTimer.current); }, []);
 
   return (
     <div className="music-editor">

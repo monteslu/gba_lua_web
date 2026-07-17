@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "postinstall": "node scripts/stage-toolchain.mjs",
     "stage": "node scripts/stage-toolchain.mjs",
-    "test": "node test/browser-build.mjs && node test/ui-drive.mjs",
+    "test": "node test/browser-build.mjs && node test/ui-drive.mjs && node test/audio-render.mjs",
     "thumbs": "node test/gen-thumbs.mjs"
   },
   "dependencies": {

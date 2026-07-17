@@ -1,12 +1,13 @@
-// preview-synth.js - a lightweight Web Audio synth for PREVIEWING tracker
-// songs in the browser. This is an APPROXIMATION for composing (square/
-// triangle/noise voices matching the XM instruments' character), NOT the
-// Maxmod mixer — the exact sound is what the emulator produces when you Play
-// the game. Presets come from the SDK's XM_INSTRUMENTS synth hints so editor
-// and file stay in lockstep.
+// preview-synth.js - a Web Audio synth for PREVIEWING tracker songs while
+// composing. An APPROXIMATION (the real sound is the Maxmod mixer when you Play
+// the game), but a clean, musical one: band-limited-ish voices through a gentle
+// lowpass + soft limiter, click-free attack/release ramps, and SAMPLE-ACCURATE
+// scheduling (all timing comes from the AudioContext clock, never setTimeout).
+// Presets come from the SDK's XM_INSTRUMENTS so editor and file stay in step.
 import { noteFreq, XM_INSTRUMENTS } from "./xm-song.js";
 
 const PRESET = new Map(XM_INSTRUMENTS.map((i) => [i.id, i.synth]));
+const MIN = 0.0005;   // envelope floor (exponential ramps can't hit 0)
 
 export class PreviewSynth {
   constructor() {
@@ -19,9 +20,19 @@ export class PreviewSynth {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AC();
-      this.master = this.ctx.createGain();
-      this.master.gain.value = 0.3;
-      this.master.connect(this.ctx.destination);
+      // master chain: gain -> soft-clip limiter -> gentle lowpass -> out.
+      // keeps 4 stacked square voices from clipping into a harsh buzz.
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0.22;                 // headroom for 4 channels
+      const shaper = this.ctx.createWaveShaper();
+      shaper.curve = softClipCurve();
+      shaper.oversample = "2x";
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 7000;              // tame the top-end fizz
+      lp.Q.value = 0.5;
+      gain.connect(shaper); shaper.connect(lp); lp.connect(this.ctx.destination);
+      this.master = gain;
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
     return this.ctx;
@@ -29,22 +40,26 @@ export class PreviewSynth {
 
   _noise() {
     if (this._noiseBuf) return this._noiseBuf;
-    const len = this.ctx.sampleRate * 0.5;
+    const len = this.ctx.sampleRate;   // 1s loop
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = buf.getChannelData(0);
     let lfsr = 0xACE1;
     for (let i = 0; i < len; i++) {
       const bit = (lfsr ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
       lfsr = (lfsr >> 1) | (bit << 15);
-      d[i] = (lfsr & 1) ? 0.8 : -0.8;
+      d[i] = (lfsr & 1) ? 0.5 : -0.5;
     }
     this._noiseBuf = buf;
     return buf;
   }
 
-  // one voice at time t. inst = 1-based XM instrument id.
+  /**
+   * Schedule one voice to start at absolute AudioContext time `t`. inst =
+   * 1-based XM instrument id. durSec is the note length; the envelope's release
+   * tail extends past it. All ramps are click-free.
+   */
   voice(inst, freq, t, durSec, vel = 64) {
-    if (!freq) return;
+    if (!freq || !this.ctx) return;
     const p = PRESET.get(inst) ?? PRESET.get(1);
     const ctx = this.ctx;
     const amp = ctx.createGain();
@@ -56,36 +71,45 @@ export class PreviewSynth {
       src.playbackRate.value = Math.max(0.1, freq / 440);
     } else {
       src = ctx.createOscillator();
-      if (p.type === "square" && p.duty !== 0.5) {
-        // duty-cycle square via two phase-shifted saws — close enough to hear
-        src.type = "square";
-      } else {
-        src.type = p.type === "triangle" ? "triangle" : "square";
-      }
-      src.frequency.value = freq;
+      src.type = p.type === "triangle" ? "triangle" : p.type === "sawtooth" ? "sawtooth" : "square";
+      src.frequency.setValueAtTime(freq, t);
     }
-    const peak = 0.28 * (vel / 64);
+    // per-voice lowpass a touch above the note so squares aren't razor-bright
+    const tone = ctx.createBiquadFilter();
+    tone.type = "lowpass";
+    tone.frequency.value = Math.min(9000, Math.max(1400, freq * 6));
+    tone.Q.value = 0.3;
+
+    // ADSR — a real attack ramp (>= 4ms) kills the click; release always
+    // returns to the floor so tails don't pile up into mud
+    const atk = Math.max(0.004, p.a);
+    const dec = Math.max(0.01, p.d);
+    const rel = Math.max(0.03, p.r);
+    const peak = 0.32 * (vel / 64);
+    const sus = Math.max(MIN, peak * p.s);
     const g = amp.gain;
-    g.setValueAtTime(0, t);
-    g.linearRampToValueAtTime(peak, t + p.a);
-    g.linearRampToValueAtTime(peak * p.s + 0.0001, t + p.a + p.d);
-    const rel = t + Math.max(p.a + p.d, durSec);
-    g.setValueAtTime(Math.max(peak * p.s, 0.0001), rel);
-    g.exponentialRampToValueAtTime(0.0001, rel + p.r);
-    src.connect(amp); amp.connect(this.master);
-    src.start(t); src.stop(rel + p.r + 0.05);
+    g.setValueAtTime(MIN, t);
+    g.linearRampToValueAtTime(peak, t + atk);
+    g.exponentialRampToValueAtTime(sus, t + atk + dec);
+    const relStart = t + Math.max(atk + dec, durSec);
+    g.setValueAtTime(Math.max(MIN, g.value), relStart);   // hold sustain to release
+    g.setValueAtTime(sus, relStart);
+    g.exponentialRampToValueAtTime(MIN, relStart + rel);
+
+    src.connect(tone); tone.connect(amp); amp.connect(this.master);
+    src.start(t);
+    src.stop(relStart + rel + 0.02);
   }
 
   /** Play one note now (piano key preview). */
   playNote(inst, note, durSec = 0.35, vel = 64) {
     const ctx = this.ensure();
-    this.voice(inst, noteFreq(note), ctx.currentTime + 0.01, durSec, vel);
+    this.voice(inst, noteFreq(note), ctx.currentTime + 0.02, durSec, vel);
   }
 
-  /** Play one tracker step's notes right now. */
-  playStep(cells, instruments, durSec) {
-    const ctx = this.ensure();
-    const t = ctx.currentTime + 0.005;
+  /** Schedule one tracker step's notes at absolute time `t` (look-ahead). */
+  scheduleStep(cells, instruments, t, durSec) {
+    if (!this.ctx) this.ensure();
     for (let ch = 0; ch < 4; ch++) {
       const cell = cells[ch];
       if (!cell) continue;
@@ -95,5 +119,20 @@ export class PreviewSynth {
     }
   }
 
+  now() { return this.ensure().currentTime; }
+
   dispose() { if (this.ctx) { try { this.ctx.close(); } catch { /* */ } this.ctx = null; } }
+}
+
+// a mild tanh-style soft clip so summed voices saturate smoothly instead of
+// hard-clipping into a buzz
+function softClipCurve() {
+  const n = 1024;
+  const curve = new Float32Array(n);
+  const k = 1.6;
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    curve[i] = Math.tanh(k * x) / Math.tanh(k);
+  }
+  return curve;
 }
