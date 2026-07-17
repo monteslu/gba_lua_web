@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "postinstall": "node scripts/stage-toolchain.mjs",
     "stage": "node scripts/stage-toolchain.mjs",
-    "test": "node test/browser-build.mjs"
+    "test": "node test/browser-build.mjs && node test/ui-drive.mjs",
+    "thumbs": "node test/gen-thumbs.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

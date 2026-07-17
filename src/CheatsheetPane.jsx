@@ -46,7 +46,7 @@ function mdToHtml(md) {
   return out.join("\n");
 }
 
-export default function CheatsheetPane({ onClose }) {
+export default function CheatsheetPane({ onClose, embedded = false }) {
   const [html, setHtml] = useState(cache);
   useEffect(() => {
     if (cache) return;
@@ -56,11 +56,13 @@ export default function CheatsheetPane({ onClose }) {
       .catch((e) => setHtml(`<p>failed to load cheatsheet: ${escapeHtml(String(e.message))}</p>`));
   }, []);
   return (
-    <div className="cheatsheet">
-      <div className="cheatsheet-head">
-        <strong>gbalua cheatsheet</strong>
-        <button onClick={onClose}>close</button>
-      </div>
+    <div className={"cheatsheet" + (embedded ? " embedded" : "")}>
+      {!embedded && (
+        <div className="cheatsheet-head">
+          <strong>gbalua cheatsheet</strong>
+          <button onClick={onClose}>close</button>
+        </div>
+      )}
       <div className="cheatsheet-body"
         dangerouslySetInnerHTML={{ __html: html ?? "<p>loading…</p>" }} />
     </div>

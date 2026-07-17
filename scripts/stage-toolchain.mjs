@@ -89,24 +89,33 @@ await cp(path.join(GBALUA, "assets", "soundbank.bin"), path.join(OUT, "sdk", "so
 // browser build uses the REAL art, not the fallback — the asset mapping below
 // mirrors gba_lua_sdk/.github/workflows/ci.yml.
 const EXAMPLES = [
-  ["hello", "hello", {}],
-  ["effects", "effects (blend + fade)", {}],
-  ["anim", "anim helpers", {}],
-  ["hwtest", "hwtest (save + timer + raster)", {}],
-  ["mode7", "mode7 (affine plane)", { mode7: "plane.png" }],
-  ["windows", "windows (hw spotlight)", { mode7: "plane.png" }],
-  ["showcase", "showcase (scene tour)", { mode7: "plane.png" }],
-  ["starfall", "starfall (shmup)", { sheet: "shmup_sheet.png" }],
+  ["hello", "hello", "The smallest real game: shapes + text, no assets.", {}],
+  ["effects", "effects", "Hardware blend + fade over a bitmap scene.", {}],
+  ["anim", "anim", "Frame-range animation helpers cycling a critter.", {}],
+  ["hwtest", "hwtest", "Raster gradient, battery save/load, the free timer.", {}],
+  ["mode7", "mode7", "An affine plane you rotate, zoom, and drive over.", { mode7: "plane.png" }],
+  ["windows", "windows", "A hardware spotlight window over the Mode 7 plane.", { mode7: "plane.png" }],
+  ["showcase", "showcase", "A scene-cycling tour of the whole feature set.", { mode7: "plane.png" }],
+  ["starfall", "starfall", "A complete shmup: tiles, sprites, HUD, music + SFX.", { sheet: "shmup_sheet.png" }],
 ];
+const THUMBS = path.join(HERE, "examples-thumbs");
 const examples = [];
-for (const [id, name, assets] of EXAMPLES) {
+for (const [id, name, blurb, assets] of EXAMPLES) {
   const p = path.join(GBALUA, "examples", id, "main.lua");
   if (!existsSync(p)) continue;
   for (const file of Object.values(assets)) {
     await mkdir(path.join(OUT, "examples", id), { recursive: true });
     await cp(path.join(GBALUA, "examples", id, file), path.join(OUT, "examples", id, file));
   }
-  examples.push({ id, name, assets, source: await readFile(p, "utf8") });
+  // thumbnails are emulator screenshots checked into examples-thumbs/
+  // (regenerate with `node test/gen-thumbs.mjs`)
+  let thumb = false;
+  if (existsSync(path.join(THUMBS, `${id}.png`))) {
+    await mkdir(path.join(OUT, "examples", id), { recursive: true });
+    await cp(path.join(THUMBS, `${id}.png`), path.join(OUT, "examples", id, "thumb.png"));
+    thumb = true;
+  }
+  examples.push({ id, name, blurb, thumb, assets, source: await readFile(p, "utf8") });
 }
 await writeFile(path.join(OUT, "examples.json"), JSON.stringify(examples));
 

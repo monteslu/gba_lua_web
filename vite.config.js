@@ -24,6 +24,7 @@ export default defineConfig({
       "gbalua/compiler/tmx-import.mjs",
       "gbalua/compiler/png-tiles.mjs",
       "gbalua/compiler/png-encode.mjs",
+      "gbalua/compiler/xm-write.mjs",
       "romdev-platform-gba/build/gba-c/gba-c.js",
       "romdev-platform-gba/build/parse-errors.js",
     ],

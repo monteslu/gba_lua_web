@@ -26,6 +26,26 @@ export function installTestHook() {
       }
       return { ok: r.ok, romBase64, log: r.log };
     },
+    /** boot a ROM, run n frames, return the canvas as a PNG dataURL (thumbnails) */
+    async bootShot(romBase64, frames = 180, presses = []) {
+      const bytes = Uint8Array.from(atob(romBase64), (c) => c.charCodeAt(0));
+      const host = await new MgbaHost().load(bytes);
+      const canvas = document.createElement("canvas");
+      canvas.width = 240; canvas.height = 160;
+      document.body.appendChild(canvas);
+      host.canvas = canvas;
+      host.ctx = canvas.getContext("2d", { alpha: false });
+      host.imageData = host.ctx.createImageData(240, 160);
+      for (let i = 0; i < frames; i++) {
+        for (const p of presses) host.setPad(p.pad, i >= p.at && i < p.at + (p.hold ?? 4));
+        host.mod._retro_run();
+      }
+      host._present();
+      const url = canvas.toDataURL("image/png");
+      host.dispose();
+      canvas.remove();
+      return url;
+    },
     /** boot a base64 ROM on an offscreen canvas, run n frames, return canvas pixels sum */
     async bootSmoke(romBase64, frames = 120) {
       const bytes = Uint8Array.from(atob(romBase64), (c) => c.charCodeAt(0));

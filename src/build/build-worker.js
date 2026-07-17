@@ -2,10 +2,15 @@
 // Protocol: main posts { type:"build", id, source }; worker replies
 // { type:"progress"|"done"|"error", id, ... }. The pipeline module owns all the
 // toolchain logic; this file is just the message plumbing.
-import { buildRom } from "./pipeline.js";
+import { buildRom, prewarmPipeline } from "./pipeline.js";
 
 self.onmessage = async (e) => {
   const { type, id, source, assets } = e.data || {};
+  if (type === "prewarm") {
+    try { await prewarmPipeline(); self.postMessage({ type: "done", id, ok: true }); }
+    catch (err) { self.postMessage({ type: "error", id, message: err?.message ?? String(err) }); }
+    return;
+  }
   if (type !== "build") return;
   try {
     const r = await buildRom({

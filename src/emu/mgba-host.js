@@ -61,7 +61,8 @@ export class MgbaHost {
     this.imageData = null;
     this.running = false;
     this._rafId = 0;
-    this.buttons = new Uint8Array(16);
+    this.buttons = new Uint8Array(16);      // keyboard state (RetroPad ids)
+    this.padButtons = new Uint8Array(16);   // gamepad state, polled per frame
     this._latestFrame = null;
     this._pixelFormat = RETRO_PIXEL_FORMAT_XRGB8888;
     this.fbWidth = 240;
@@ -111,7 +112,7 @@ export class MgbaHost {
     mod._retro_set_input_poll(mod.addFunction(() => {}, "v"));
     const inputStateCb = mod.addFunction((port, device, index, id) => {
       if (port !== 0 || device !== RETRO_DEVICE_JOYPAD) return 0;
-      return this.buttons[id] ? 1 : 0;
+      return this.buttons[id] || this.padButtons[id] ? 1 : 0;
     }, "iiiii");
     mod._retro_set_input_state(inputStateCb);
 
@@ -180,10 +181,40 @@ export class MgbaHost {
   /** Set a RetroPad id directly. */
   setPad(padId, down) { this.buttons[padId] = down ? 1 : 0; }
 
+  // ---- debugger access: the running machine's work RAM -----------------------
+  // libretro RETRO_MEMORY_SYSTEM_RAM (2) = the GBA's EWRAM (0x02000000, 256 KB
+  // — where gbalua globals/arrays live via the heap).
+  _ramPtr() {
+    if (!this.mod || typeof this.mod._retro_get_memory_data !== "function") return 0;
+    return this.mod._retro_get_memory_data(2);
+  }
+  /** Size of the inspectable RAM (0 if the core doesn't expose it). */
+  ramSize() {
+    if (!this.mod || typeof this.mod._retro_get_memory_size !== "function") return 0;
+    return this.mod._retro_get_memory_size(2);
+  }
+  /** Read `len` bytes at RAM offset `off` (a copy — safe to hold). */
+  readRam(off, len) {
+    const ptr = this._ramPtr();
+    if (!ptr) return new Uint8Array(0);
+    const size = this.ramSize();
+    const n = Math.max(0, Math.min(len, size - off));
+    return this.mod.HEAPU8.slice(ptr + off, ptr + off + n);
+  }
+  /** Write one byte into the running machine's RAM. */
+  writeRam(off, value) {
+    const ptr = this._ramPtr();
+    if (ptr && off >= 0 && off < this.ramSize()) this.mod.HEAPU8[ptr + off] = value & 0xff;
+  }
+
+  /** Hook: called once per rAF to refresh gamepad state (set by the pane). */
+  pollPads = null;
+
   // Pace retro_run to the core's fps against the wall clock — rAF fires at the
   // display's refresh (may be 120+ Hz) and must not double-speed the game.
   _loop = (now) => {
     if (!this.running || !this.mod) return;
+    if (this.pollPads) this.pollPads(this.padButtons);
     if (typeof now !== "number") now = performance.now();
     if (!this._lastT) this._lastT = now;
     this._acc += now - this._lastT;

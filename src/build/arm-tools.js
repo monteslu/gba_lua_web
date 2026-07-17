@@ -67,6 +67,14 @@ function ensureDirs(FS, filePath) {
   }
 }
 
+/** Fetch + compile every tool's WASM (startup prewarm). */
+export async function prewarmTools() {
+  await Promise.all([
+    loadTool("cc1-arm"), loadTool("arm-none-eabi-as"),
+    loadTool("arm-none-eabi-ld"), loadTool("arm-none-eabi-objcopy"),
+  ]);
+}
+
 // base64 <-> bytes (workers have atob/btoa)
 const b64ToBytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 function bytesToB64(u8) {

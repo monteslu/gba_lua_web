@@ -1,14 +1,11 @@
 // examples.js — the gallery, staged from the gbalua npm package into
-// /gba/examples.json by scripts/stage-toolchain.mjs (the package's exports map
-// doesn't expose ./examples/*, so we bundle at stage time instead of
-// deep-importing). Single source of truth stays the SDK's own examples.
-// `assets` maps slot -> file name ({sheet: "shmup_sheet.png"}); the files are
-// staged under /gba/examples/<id>/ and fetched on demand so an example builds
-// with its REAL art, matching the SDK CI's --sheet/--mode7 flags.
+// /gba/examples.json by scripts/stage-toolchain.mjs. Single source of truth
+// stays the SDK's own examples. Each entry: { id, name, blurb, thumb,
+// assets: {slot: file}, source }. Asset files + thumb.png are staged under
+// /gba/examples/<id>/.
 
 let cached = null;
 
-/** @returns {Promise<Array<{id:string,name:string,assets:Record<string,string>,source:string}>>} */
 export async function loadExamples() {
   if (cached) return cached;
   const r = await fetch("/gba/examples.json");
@@ -18,16 +15,17 @@ export async function loadExamples() {
 }
 
 /**
- * Fetch an example's staged asset files as pipeline-ready assets.
- * @param {{id:string, assets:Record<string,string>}} example
- * @returns {Promise<{sheet?:{name,bytes}, map?:{name,bytes}, mode7?:{name,bytes}}>}
+ * An example's files, project-shaped (main.lua + sheet.png/mode7.png/...),
+ * ready for createProject().
+ * @param {{id:string, assets:Record<string,string>, source:string}} example
  */
-export async function loadExampleAssets(example) {
-  const out = {};
+export async function loadExampleFiles(example) {
+  const files = { "main.lua": example.source };
+  const SLOT_FILE = { sheet: "sheet.png", map: "map.png", mode7: "mode7.png" };
   for (const [slot, file] of Object.entries(example.assets ?? {})) {
     const r = await fetch(`/gba/examples/${example.id}/${file}`);
     if (!r.ok) throw new Error(`fetch example asset ${file}: ${r.status}`);
-    out[slot] = { name: file, bytes: new Uint8Array(await r.arrayBuffer()) };
+    files[SLOT_FILE[slot] ?? file] = new Uint8Array(await r.arrayBuffer());
   }
-  return out;
+  return files;
 }

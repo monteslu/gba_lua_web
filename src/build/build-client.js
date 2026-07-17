@@ -45,3 +45,18 @@ export function build(source, opts = {}) {
     w.postMessage({ type: "build", id, source, assets: opts.assets });
   });
 }
+
+/**
+ * Warm the build worker: fetch the share manifest + SDK payloads and compile
+ * all four tool WASMs (cc1-arm is 38 MB — doing this at startup makes the
+ * first Play fast instead of silently slow).
+ */
+export function prewarm() {
+  const w = ensureWorker();
+  const id = nextId++;
+  return new Promise((resolve) => {
+    // never reject — a failed prewarm just means a cold first build
+    pending.set(id, { resolve, reject: () => resolve(false), onProgress: null });
+    w.postMessage({ type: "prewarm", id });
+  });
+}

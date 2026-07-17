@@ -71,6 +71,16 @@ async function subtleHash(srcMap) {
 const sdkCache = new Map();
 
 /**
+ * Prewarm: fetch the static payloads and compile every tool WASM so the first
+ * real build doesn't pay the 38 MB cc1 compile interactively.
+ */
+export async function prewarmPipeline() {
+  await loadStatics();
+  const { prewarmTools } = await import("./arm-tools.js");
+  await prewarmTools();
+}
+
+/**
  * Build a gbalua game.
  * @param {{source:string,
  *   assets?: {sheet?: {name:string, bytes:Uint8Array},
