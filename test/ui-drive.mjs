@@ -128,16 +128,28 @@ try {
   ok("line/rect/select/copy/paste tools work (undo armed)", undoOn);
   await shot("drive-3-sprites");
 
-  // ---- 6. frames: animation preview -------------------------------------------
+  // ---- 6. frames: does NOT auto-animate on open, animates on play -------------
   await page.click(".pane-tabs .tab:has-text('frames')");
   await page.waitForSelector(".frame-preview", { timeout: 5000 });
-  const frameLabel1 = await page.$eval(".frame-label", (el) => el.textContent);
-  await page.waitForFunction((prev) => document.querySelector(".frame-label")?.textContent !== prev,
-    frameLabel1, { timeout: 5000 }).catch(() => {});
-  const frameLabel2 = await page.$eval(".frame-label", (el) => el.textContent);
-  ok("frames pane animates the sprite range", frameLabel1 !== frameLabel2, `${frameLabel1} -> ${frameLabel2}`);
+  // the label must be stable (paused) for a beat — no motion on open
+  const labelA = await page.$eval(".frame-label", (el) => el.textContent);
+  await page.waitForTimeout(900);
+  const labelB = await page.$eval(".frame-label", (el) => el.textContent);
+  ok("frames pane does NOT auto-animate on open", labelA === labelB && /range/.test(labelA), `"${labelA}" stayed "${labelB}"`);
+  // press play -> it animates
+  await page.click(".frame-toolbar .m-play");
+  await page.waitForFunction(() => /spr\(\d+\)/.test(document.querySelector(".frame-label")?.textContent ?? ""), { timeout: 4000 }).catch(() => {});
+  const playingLabel = await page.$eval(".frame-label", (el) => el.textContent);
+  ok("frames pane animates only after pressing play", /spr\(\d+\)/.test(playingLabel), playingLabel);
+  await page.click(".frame-toolbar .m-play");   // pause again
   const snippet = await page.$eval(".frame-usebar code", (el) => el.textContent);
   ok("frames pane offers the anim() snippet", /spr\(anim\(0, \d+, \d+, \d+\), x, y\)/.test(snippet), snippet);
+  // affine (sprr) toggle -> the snippet switches to a hardware affine call
+  await page.click(".frame-toolbar .fx-check input");
+  await page.waitForTimeout(200);
+  const affineSnippet = await page.$eval(".frame-usebar code", (el) => el.textContent);
+  ok("frames pane affine toggle emits sprr()", /sprr\(\d+, x, y/.test(affineSnippet), affineSnippet);
+  await page.click(".frame-toolbar .fx-check input");   // off
 
   // ---- 7. music tracker ---------------------------------------------------------
   await page.click(".pane-tabs .tab:has-text('music')");
@@ -189,6 +201,61 @@ try {
   const bgPreviews = await page.$$eval(".asset-preview", (c) => c.length);
   ok("mode7 example ships its plane (backgrounds preview)", bgPreviews === 1, `${bgPreviews} preview`);
   await shot("drive-6-backgrounds");
+
+  // ---- 9b. Mode 7 designer: live camera + generated call --------------------------
+  await page.click(".pane-tabs .tab:has-text('mode 7')");
+  await page.waitForSelector(".m7-canvas", { timeout: 5000 });
+  const m7canvasBefore = await page.$eval(".m7-canvas", (cv) => {
+    const c = document.createElement("canvas"); c.width = cv.width; c.height = cv.height;
+    const x = c.getContext("2d"); x.drawImage(cv, 0, 0);
+    return x.getImageData(0, 100, 240, 1).data.reduce((a, b) => a + b, 0);
+  });
+  // drag the angle slider and confirm the plane re-renders + the call updates
+  const angleSlider = await page.$(".m7-field:has-text('angle') input");
+  await angleSlider.focus();
+  for (let i = 0; i < 10; i++) await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(200);
+  const m7canvasAfter = await page.$eval(".m7-canvas", (cv) => {
+    const c = document.createElement("canvas"); c.width = cv.width; c.height = cv.height;
+    const x = c.getContext("2d"); x.drawImage(cv, 0, 0);
+    return x.getImageData(0, 100, 240, 1).data.reduce((a, b) => a + b, 0);
+  });
+  ok("mode 7 designer re-renders the plane as the camera moves", m7canvasBefore !== m7canvasAfter, `${m7canvasBefore} -> ${m7canvasAfter}`);
+  const m7code = await page.$eval(".m7-pane .fx-snippet code", (el) => el.textContent);
+  ok("mode 7 designer emits mode7_cam()", /mode7_cam\(\d+, \d+, [-\d.]+/.test(m7code), m7code.replace(/\n/g, " ").slice(0, 60));
+  await shot("drive-6b-mode7");
+
+  // ---- 9c. Palette pane: BGR555 picker + snippet ----------------------------------
+  await page.click(".pane-tabs .tab:has-text('palette')");
+  await page.waitForSelector(".pal-pane", { timeout: 5000 });
+  // move the R slider; the spr_col snippet must update
+  const rSlider = await page.$(".pal-slider input[type=range]");
+  await rSlider.focus();
+  for (let i = 0; i < 20; i++) await page.keyboard.press("ArrowLeft");
+  await page.waitForTimeout(150);
+  const palCode = await page.$eval(".pal-pane .fx-snippet code", (el) => el.textContent);
+  ok("palette pane emits a runtime palette call", /(spr_col|pal)\(\d+, \d+, \d+, \d+\)/.test(palCode), palCode);
+
+  // ---- 9d. Effects lab: each effect tab emits its call ----------------------------
+  await page.click(".pane-tabs .tab:has-text('effects')");
+  await page.waitForSelector(".fx-pane", { timeout: 5000 });
+  const fxChecks = [
+    ["Blend", /blend\(\d+, [\d.]+\)/],
+    ["Fade", /fade\([\d.]+/],
+    ["Mosaic", /mosaic\(\d+\)/],
+    ["Window", /window\(\d+, \d+, \d+, \d+\)/],
+    ["Backdrop", /backdrop\(rgb15\(/],
+    ["HGradient", /hgradient|rgb15/],
+  ];
+  let fxOk = true, fxDetail = "";
+  for (const [tab, re] of fxChecks) {
+    await page.click(`.fx-tab:has-text('${tab}')`);
+    await page.waitForTimeout(120);
+    const code = await page.$eval(".fx-pane .fx-snippet code", (el) => el.textContent).catch(() => "");
+    if (!re.test(code)) { fxOk = false; fxDetail = `${tab}: "${code.slice(0, 40)}"`; }
+  }
+  ok("effects lab: all 6 effect tabs emit their SDK call", fxOk, fxDetail);
+  await shot("drive-6d-effects");
 
   // ---- 10. cheatsheet tab ----------------------------------------------------------
   await page.click(".pane-tabs .tab:has-text('cheatsheet')");

@@ -23,6 +23,9 @@ import { sheetFromPng, sheetToPng, newSheet } from "./gfx/sheet-model.js";
 import { FrameEditor } from "./gfx/FrameEditor.jsx";
 import { MusicEditor } from "./audio/MusicEditor.jsx";
 import { newSong, songToXm } from "./audio/xm-song.js";
+import { EffectsPane } from "./hw/EffectsPane.jsx";
+import { PalettePane } from "./hw/PalettePane.jsx";
+import { Mode7Pane } from "./hw/Mode7Pane.jsx";
 import { p8ToProject, p8PngToProject } from "./import/p8-import.js";
 
 const Editor = lazy(() => import("./Editor.jsx"));
@@ -359,6 +362,9 @@ export default function App() {
     ["frames", "frames"],
     ["music", songs.length ? `music (${songs.length})` : "+ music"],
     ["bg", "backgrounds"],
+    ["mode7", "mode 7"],
+    ["palette", "palette"],
+    ["effects", "effects"],
     ["cheat", "📖 cheatsheet"],
   ];
 
@@ -436,6 +442,9 @@ export default function App() {
               {view === "bg" && (
                 <BackgroundsPane mapPng={mapPng} mode7Png={mode7Png} setBgFile={setBgFile} setBuildErr={setBuildErr} />
               )}
+              {view === "mode7" && <Mode7Pane mode7Png={mode7Png} onImport={() => setView("bg")} />}
+              {view === "palette" && <PalettePane sheet={sheet} />}
+              {view === "effects" && <EffectsPane />}
               {view === "cheat" && (
                 <Suspense fallback={<div className="pane-loading">loading…</div>}>
                   <CheatsheetPane onClose={() => setView("code")} embedded />
