@@ -39,6 +39,16 @@ hosted in a worker instead of node. CI enforces this on every push.
   modules alongside composed songs.
 - **Backgrounds.** Import the `map_show()` tilemap and the Mode 7 plane from
   PNG, Aseprite, or Tiled `.tmx` (embedded tilesets).
+- **Mode 7 designer.** Drive a camera (x/y/angle/zoom) over the project's
+  affine plane in a live perspective preview; copy the `mode7_cam(...)` call.
+- **Palette.** A BGR555-accurate color designer (32 levels/channel, shows what
+  the hardware actually displays), the sheet's extracted 15-color palette, and
+  `spr_col()`/`pal()`/`rgb15()` snippets — the GBA's runtime palette control.
+- **Effects lab.** Interactive alpha-blend, brightness fade, hardware mosaic,
+  clip windows, backdrop color, and a per-scanline HGradient sky designer —
+  each with a live preview and a copyable SDK call.
+- **Affine sprites.** The frames pane can rotate/scale a sprite and emit
+  `sprr(n, x, y, angle, scale)` (GBA hardware OBJ affine).
 - **Debugger.** A live hex view of the running game's EWRAM, ~10 Hz refresh,
   click a byte to poke it.
 - **Import.** Bring in a project `.zip`, or a PICO-8 `.p8` / `.p8.png` cart —
