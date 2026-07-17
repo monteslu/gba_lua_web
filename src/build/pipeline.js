@@ -95,10 +95,14 @@ export async function prewarmPipeline() {
  */
 export async function buildRom({ source, assets = {}, onProgress = () => {} }) {
   let log = "";
-  const note = (m) => { log += m + "\n"; onProgress(m); };
+  // progress reports { frac: 0..1, label } so the UI can draw a real bar.
+  // steps: compile + assets + (cc1+as per TU) + runtime objs + link + objcopy.
+  let step = 0, totalSteps = 8;
+  const report = (label, advance = true) => { if (advance) step++; onProgress({ frac: Math.min(0.99, step / totalSteps), label }); };
+  const note = (m) => { log += m + "\n"; report(m, false); };
 
   // ── 1. Lua -> C ───────────────────────────────────────────────────────────
-  onProgress("compiling Lua");
+  report("compiling Lua");
   const res = compile(source, "main.lua", { target: "gba" });
   if (!res.ok) {
     return {
@@ -129,6 +133,10 @@ export async function buildRom({ source, assets = {}, onProgress = () => {} }) {
     if (!(n in sources) && n !== "gba_sound.c") sources[n] = st.sdk.sources[n];
   }
   if (usesSound && st.sdk.sources["gba_sound.c"]) sources["gba_sound.c"] = st.sdk.sources["gba_sound.c"];
+  // now that the TU count is known, size the progress bar accurately:
+  // compile(1) + assets(1) + 2 tool jobs per source + crt0/stubs(1) + link(1)
+  // + objcopy(1). The driver drives the per-job reports via env.runTool below.
+  totalSteps = 3 + Object.keys(sources).length * 2 + 3;
   const includes = { ...st.sdk.includes };
   includes["gba_config.h"] =
     `#ifndef GBA_CONFIG_H\n#define GBA_CONFIG_H\n${usesSound ? "#define GBA_HAVE_SOUND 1\n" : ""}#endif\n`;
@@ -161,14 +169,15 @@ export async function buildRom({ source, assets = {}, onProgress = () => {} }) {
   if (usesSound) binaryIncludes["soundbank.bin"] = soundbank;
 
   // ── 3. C -> .gba through the canonical driver, env-injected ───────────────
-  onProgress("building ROM (arm-gcc WASM)");
+  report("assets");
   try {
     const r = await buildGbaC({
       sources, headers: includes, binaryIncludes,
       runtime: "libtonc", maxmod: usesSound,
       env: {
         runTool: async (job) => {
-          onProgress(`${job.tool} ${job.argv?.find((a) => a.endsWith(".c") || a.endsWith(".s")) ?? ""}`.trim());
+          const file = job.argv?.find((a) => a.endsWith(".c") || a.endsWith(".s"))?.replace("/work/", "") ?? "";
+          report(`${job.tool}${file ? " " + file : ""}`);
           return runToolJob(job);
         },
         share: st.share,

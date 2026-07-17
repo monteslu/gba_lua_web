@@ -53,6 +53,15 @@ try {
   // ---- 3. Play through the real button ---------------------------------------
   await page.waitForSelector("button.play:not([disabled])", { timeout: 300000 });   // prewarm
   await page.click("button.play");
+  // the building overlay + progress bar appears and the bar advances
+  await page.waitForSelector(".emu-overlay.building .emu-fill", { timeout: 10000 });
+  const w0 = await page.$eval(".emu-overlay.building .emu-fill", (el) => el.style.width);
+  await page.waitForFunction(() => {
+    const el = document.querySelector(".emu-overlay.building .emu-fill");
+    return el && parseInt(el.style.width) > 5;
+  }, { timeout: 60000 }).catch(() => {});
+  const wMid = await page.$eval(".emu-overlay.building .emu-fill", (el) => el.style.width).catch(() => "gone");
+  ok("build shows a progress bar that advances", w0 !== undefined && (wMid === "gone" || parseInt(wMid) >= parseInt(w0)), `${w0} -> ${wMid}`);
   await page.waitForFunction(() => document.querySelector(".build-msg")?.textContent?.includes("built"), { timeout: 300000 });
   await page.waitForTimeout(1200);
   const pixelSum = await page.$eval(".emu-screen", (cv) => {

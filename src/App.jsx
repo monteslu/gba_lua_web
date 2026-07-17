@@ -59,6 +59,7 @@ export default function App() {
   const [rom, setRom] = useState(null);
   const [host, setHost] = useState(null);
   const [building, setBuilding] = useState(false);
+  const [progress, setProgress] = useState(null);   // { frac, label } while building
   const [warm, setWarm] = useState(false);
   const [buildMsg, setBuildMsg] = useState("");
   const [buildErr, setBuildErr] = useState("");
@@ -245,13 +246,20 @@ export default function App() {
     if (errors.length || !warm || !currentId || building) return;
     const seq = ++buildSeq.current;
     setBuilding(true); setBuildErr(""); setBuildMsg("building…");
+    setProgress({ frac: 0, label: "starting…" });
     try {
       const r = await build(source, {
         assets: buildAssets(),
-        onProgress: (m) => { if (seq === buildSeq.current) setBuildMsg(m); },
+        onProgress: (p) => {
+          if (seq !== buildSeq.current) return;
+          // pipeline emits { frac, label }; be tolerant of a bare string too
+          if (p && typeof p === "object") { setProgress(p); setBuildMsg(p.label); }
+          else { setBuildMsg(String(p)); }
+        },
       });
       if (seq !== buildSeq.current) return;
       if (r.ok && r.rom) {
+        setProgress({ frac: 1, label: "done" });
         setBuildMsg(`built ${r.rom.length.toLocaleString()} bytes`);
         setRom(r.rom);
       } else {
@@ -438,7 +446,7 @@ export default function App() {
 
           <section className="pane emu-col">
             <div className="col-resizer emu-resizer" onPointerDown={startEmuDrag} title="drag to resize" />
-            <EmulatorPane rom={rom} onHost={setHost} />
+            <EmulatorPane rom={rom} onHost={setHost} building={building} progress={progress} />
             <div className="pane-tabs bottom">
               <button className={"tab " + (bottomTab === "problems" ? "sel" : "")} onClick={() => setBottomTab("problems")}>
                 problems{errors.length ? ` (${errors.length})` : ""}
