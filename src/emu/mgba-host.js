@@ -217,27 +217,40 @@ export class MgbaHost {
   /** Hook: called once per rAF to refresh gamepad state (set by the pane). */
   pollPads = null;
 
-  // Pace retro_run to the core's fps against the wall clock — rAF fires at the
-  // display's refresh (may be 120+ Hz) and must not double-speed the game.
+  // AUDIO-CLOCK PACING. rAF is jittery and locked to the DISPLAY refresh, not
+  // the GBA's 59.73Hz — pacing frame production off rAF makes the audio ring
+  // under/overrun (choppy). Instead, when audio is running, we produce exactly
+  // enough emulator frames to keep the ring near a target fill: the audio sink
+  // drains the ring at a steady hardware rate, so "refill to target" locks
+  // production to consumption. rAF only decides WHEN to check + present video.
+  // Before audio is unlocked (no sink draining), fall back to wall-clock pacing.
   _loop = (now) => {
     if (!this.running || !this.mod) return;
     if (this.pollPads) this.pollPads(this.padButtons);
     if (typeof now !== "number") now = performance.now();
-    if (!this._lastT) this._lastT = now;
-    this._acc += now - this._lastT;
-    this._lastT = now;
-    if (this._acc > 250) this._acc = 250;
-    const frameMs = 1000 / this.fps;
+
     let ran = false;
-    // cap catch-up to 4 frames so a stall can't dump a huge audio burst that
-    // overruns the ring (the extra audio would just be dropped anyway)
-    let budget = 4;
-    while (this._acc >= frameMs && budget-- > 0) {
-      this._acc -= frameMs;
-      this.mod._retro_run();          // pushes audio into the ring via the callback
-      ran = true;
+    const frameSamples = this.sampleRate / this.fps;   // core frames per video frame
+    if (this._audioCtx && this._ring) {
+      // audio-driven: run frames until the ring holds ~2 video-frames of audio
+      // (a small cushion), capped so a long stall can't spin forever
+      const target = Math.floor(frameSamples * 2.5);
+      let budget = 6;
+      while (this._ringFill < target && budget-- > 0) {
+        this.mod._retro_run();
+        ran = true;
+      }
+    } else {
+      // no audio yet: wall-clock accumulator so video still paces correctly
+      if (!this._lastT) this._lastT = now;
+      this._acc += now - this._lastT;
+      this._lastT = now;
+      if (this._acc > 250) this._acc = 250;
+      const frameMs = 1000 / this.fps;
+      let budget = 4;
+      while (this._acc >= frameMs && budget-- > 0) { this._acc -= frameMs; this.mod._retro_run(); ran = true; }
+      if (this._acc > frameMs * 4) this._acc = 0;
     }
-    if (this._acc > frameMs * 4) this._acc = 0;   // give up on a big backlog
     if (ran) this._present();
     this._rafId = requestAnimationFrame(this._loop);
   };
