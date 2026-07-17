@@ -21,9 +21,10 @@ hosted in a worker instead of node. CI enforces this on every push.
   from the real compiler on every keystroke (the compiler *is* the language
   service), plus a problems panel.
 - **Build & run.** Play (Ctrl+Enter / Ctrl+R) compiles Lua → C → arm-gcc WASM
-  → `.gba`, then runs it on the mGBA core. Keyboard and any standard-layout
-  **gamepad** drive the pad. The toolchain prewarms at startup so the first
-  Play is fast.
+  → `.gba` with a live **progress bar** on the emulator, then runs it on the
+  mGBA core. Keyboard and any standard-layout **gamepad** drive the pad (a
+  mapper handles non-standard controllers); **fullscreen** grabs the controls.
+  The toolchain prewarms at startup so the first Play is fast.
 - **Sprite editor.** Pencil / eraser / fill / line / rect / eyedropper,
   marquee select with copy/cut/paste, zoom, undo/redo, an 8px + 16px sprite
   grid, and a palette manager that enforces the GBA's 4bpp budget (15 colors
