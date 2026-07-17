@@ -149,22 +149,38 @@ export default function App() {
     }, 50);
   }, [persist]);
 
-  const persistSongbook = useCallback((entries, extraFiles) => {
+  // musicFilesRef mirrors the musicFiles state so the debounced write always
+  // sees the latest module bytes — NOT a stale `extraFiles` closure. Without
+  // this, importing a module then quickly editing a note (whose write shares
+  // the "music" debounce key and carries no extraFiles) would drop the import.
+  const musicFilesRef = useRef(musicFiles);
+  useEffect(() => { musicFilesRef.current = musicFiles; }, [musicFiles]);
+
+  const persistSongbook = useCallback((entries) => {
     persist("music", (rec) => {
       rec.files["music.json"] = serializeSongbook(entries);
-      // drop music/ files no longer referenced; add new ones
       const referenced = new Set(entries.filter((e) => e.kind === "file").map((e) => e.path));
+      // drop unreferenced music/ files; write back every referenced one from
+      // the live map (survives a note edit landing after an import)
       for (const p of Object.keys(rec.files)) {
         if (p.startsWith("music/") && !referenced.has(p)) delete rec.files[p];
       }
-      for (const [p, bytes] of Object.entries(extraFiles ?? {})) rec.files[p] = bytes;
+      for (const p of referenced) {
+        const bytes = musicFilesRef.current[p];
+        if (bytes) rec.files[p] = bytes;
+      }
     }, 300);
   }, [persist]);
 
   const onSongsChange = useCallback((entries, extraFiles) => {
     setSongs(entries);
-    if (extraFiles) setMusicFiles((mf) => ({ ...mf, ...extraFiles }));
-    persistSongbook(entries, extraFiles);
+    // update the ref synchronously so a debounced write firing before React
+    // commits still sees the new bytes
+    if (extraFiles) {
+      musicFilesRef.current = { ...musicFilesRef.current, ...extraFiles };
+      setMusicFiles(musicFilesRef.current);
+    }
+    persistSongbook(entries);
   }, [persistSongbook]);
 
   // --- project ops -------------------------------------------------------------
@@ -536,7 +552,7 @@ function BackgroundsPane({ mapPng, mode7Png, setBgFile, setBuildErr }) {
     const picked = await pickFiles(".png,.ase,.aseprite,.tmx");
     if (!picked.length) return;
     try {
-      const { importImage } = await import("./assets/asset-store.js");
+      const { importImage } = await import("./import/image-import.js");
       const main = picked.find((f) => !/\.png$/i.test(f.name)) ?? picked[0];
       const siblings = {};
       for (const f of picked) siblings[f.name] = f.bytes;
