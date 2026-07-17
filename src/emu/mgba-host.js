@@ -69,9 +69,17 @@ export class MgbaHost {
     this.fbHeight = 160;
     this.fps = 59.727;
     this.sampleRate = 32768;
+    // audio: a continuous ring buffer feeding ONE persistent node, so audio
+    // never depends on when rAF fires (per-chunk scheduling glitched badly).
     this._audioCtx = null;
-    this._nextAudioTime = 0;
-    this._audioQueue = [];
+    this._audioNode = null;
+    this._ring = null;         // Float32Array, interleaved stereo
+    this._ringCap = 0;         // frames (L+R pairs) the ring holds
+    this._ringWrite = 0;       // write cursor (in frames)
+    this._ringRead = 0;        // read cursor (in frames)
+    this._ringFill = 0;        // frames currently buffered
+    this._lastL = 0; this._lastR = 0;   // held on underrun (no click)
+    this._primed = false;      // wait until enough buffered before playing
   }
 
   /** Load the core and a ROM (Uint8Array). */
@@ -101,13 +109,15 @@ export class MgbaHost {
     mod._retro_set_video_refresh(videoCb);
 
     const audioBatchCb = mod.addFunction((dataPtr, frames) => {
-      const n = frames * 2;   // interleaved s16 stereo
-      const src = new Int16Array(mod.HEAP16.buffer, dataPtr, n);
-      this._audioQueue.push(Int16Array.from(src));
+      // s16 interleaved stereo straight into the ring (converted to float)
+      this._pushAudio(new Int16Array(mod.HEAP16.buffer, dataPtr, frames * 2), frames);
       return frames;
     }, "iii");
     mod._retro_set_audio_sample_batch(audioBatchCb);
-    mod._retro_set_audio_sample(mod.addFunction(() => {}, "vii"));
+    mod._retro_set_audio_sample(mod.addFunction((l, r) => {
+      const s = new Int16Array(2); s[0] = l; s[1] = r;
+      this._pushAudio(s, 1);
+    }, "vii"));
 
     mod._retro_set_input_poll(mod.addFunction(() => {}, "v"));
     const inputStateCb = mod.addFunction((port, device, index, id) => {
@@ -156,17 +166,14 @@ export class MgbaHost {
     if (this._audioCtx && this._audioCtx.state === "running") {
       try { this._audioCtx.suspend(); } catch { /* ignore */ }
     }
-    this._audioQueue.length = 0;
+    this._resetRing();
   }
 
   resume() {
     if (this.running || !this.mod) return;
     this.running = true;
     this._acc = 0; this._lastT = 0;
-    if (this._audioCtx) {
-      try { this._audioCtx.resume(); } catch { /* ignore */ }
-      this._nextAudioTime = this._audioCtx.currentTime;
-    }
+    if (this._audioCtx) { try { this._audioCtx.resume(); } catch { /* ignore */ } }
     this._loop();
   }
 
@@ -222,12 +229,15 @@ export class MgbaHost {
     if (this._acc > 250) this._acc = 250;
     const frameMs = 1000 / this.fps;
     let ran = false;
-    while (this._acc >= frameMs) {
+    // cap catch-up to 4 frames so a stall can't dump a huge audio burst that
+    // overruns the ring (the extra audio would just be dropped anyway)
+    let budget = 4;
+    while (this._acc >= frameMs && budget-- > 0) {
       this._acc -= frameMs;
-      this.mod._retro_run();
-      this._flushAudio();
+      this.mod._retro_run();          // pushes audio into the ring via the callback
       ran = true;
     }
+    if (this._acc > frameMs * 4) this._acc = 0;   // give up on a big backlog
     if (ran) this._present();
     this._rafId = requestAnimationFrame(this._loop);
   };
@@ -262,42 +272,81 @@ export class MgbaHost {
     this.ctx.putImageData(this.imageData, 0, 0);
   }
 
-  /** Call from a user gesture to enable sound (browsers gate AudioContext). */
-  unlockAudio() {
-    if (!this._audioCtx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      this._audioCtx = new AC({ sampleRate: this.sampleRate });
-      this._nextAudioTime = this._audioCtx.currentTime;
-    }
-    if (this._audioCtx.state === "suspended") this._audioCtx.resume();
+  // ---- ring-buffer audio: one persistent node pulls continuously -----------
+  _resetRing() {
+    this._ringWrite = this._ringRead = this._ringFill = 0;
+    this._resamplePos = 0;
+    this._primed = false;
   }
 
-  _flushAudio() {
-    if (!this._audioQueue.length) return;
-    if (!this._audioCtx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      this._audioCtx = new AC({ sampleRate: this.sampleRate });
-      this._nextAudioTime = this._audioCtx.currentTime;
+  /** Call from a user gesture to enable sound (browsers gate AudioContext). */
+  unlockAudio() {
+    if (!this._audioCtx) this._initAudio();
+    if (this._audioCtx && this._audioCtx.state === "suspended") this._audioCtx.resume();
+  }
+
+  _initAudio() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    // The GBA core outputs at this.sampleRate (65536 Hz). Browsers CANNOT make
+    // an AudioContext above ~48kHz — asking for 65536 silently yields 44100/
+    // 48000, and then the stream plays at the wrong pitch/speed ("sounds like
+    // shit"). So take the context's own rate and RESAMPLE in the pull.
+    this._audioCtx = new AC();
+    const rate = this._audioCtx.sampleRate;      // e.g. 48000
+    this._resampleStep = this.sampleRate / rate; // core-frames advanced per out-frame
+    this._resamplePos = 0;                        // fractional read position
+    // the ring holds CORE-rate frames; ~0.5s of them
+    this._ringCap = Math.ceil(this.sampleRate * 0.5);
+    this._ring = new Float32Array(this._ringCap * 2);
+    this._resetRing();
+    // ScriptProcessor is deprecated but universally available and perfect for a
+    // pull sink; 2048 frames ≈ 62ms blocks. (An AudioWorklet would need a
+    // separate module file + SAB; not worth it for a preview emulator.)
+    const BUF = 2048;
+    const node = this._audioCtx.createScriptProcessor(BUF, 0, 2);
+    node.onaudioprocess = (e) => this._pullAudio(e.outputBuffer);
+    node.connect(this._audioCtx.destination);
+    this._audioNode = node;
+  }
+
+  // core -> ring. `interleaved` is s16 L,R,L,R…; `frames` = L/R pairs.
+  _pushAudio(interleaved, frames) {
+    if (!this._audioCtx) return;   // no audio until unlocked
+    const ring = this._ring, cap = this._ringCap;
+    let w = this._ringWrite;
+    for (let i = 0; i < frames; i++) {
+      if (this._ringFill >= cap) break;   // overrun: drop (we're ahead of realtime)
+      ring[w * 2] = interleaved[i * 2] / 32768;
+      ring[w * 2 + 1] = interleaved[i * 2 + 1] / 32768;
+      w = (w + 1) % cap;
+      this._ringFill++;
     }
-    const ctx = this._audioCtx;
-    for (const chunk of this._audioQueue) {
-      const frames = chunk.length / 2;
-      if (!frames) continue;
-      const buf = ctx.createBuffer(2, frames, this.sampleRate);
-      const L = buf.getChannelData(0), R = buf.getChannelData(1);
-      for (let i = 0; i < frames; i++) {
-        L[i] = chunk[i * 2] / 32768;
-        R[i] = chunk[i * 2 + 1] / 32768;
-      }
-      const node = ctx.createBufferSource();
-      node.buffer = buf;
-      node.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (this._nextAudioTime < now) this._nextAudioTime = now;
-      node.start(this._nextAudioTime);
-      this._nextAudioTime += frames / this.sampleRate;
+    this._ringWrite = w;
+    // prime once we have a comfortable cushion (~1/8s) so playback starts smooth
+    if (!this._primed && this._ringFill >= this._ringCap / 4) this._primed = true;
+  }
+
+  // ring (core rate) -> speakers (context rate), linearly resampled. Advances
+  // the fractional read position by _resampleStep per output frame; on underrun
+  // holds the last sample (click-free) and re-primes.
+  _pullAudio(outBuf) {
+    const L = outBuf.getChannelData(0), R = outBuf.getChannelData(1);
+    const n = outBuf.length;
+    const ring = this._ring, cap = this._ringCap, step = this._resampleStep;
+    if (!this._primed) { L.fill(this._lastL); R.fill(this._lastR); return; }
+    let r = this._ringRead, frac = this._resamplePos;
+    for (let i = 0; i < n; i++) {
+      // need at least 2 core frames buffered to interpolate the next output frame
+      if (this._ringFill < 2 && frac >= 1) { L[i] = this._lastL; R[i] = this._lastR; continue; }
+      const i0 = r, i1 = (r + 1) % cap;
+      const l = ring[i0 * 2] + (ring[i1 * 2] - ring[i0 * 2]) * frac;
+      const rr = ring[i0 * 2 + 1] + (ring[i1 * 2 + 1] - ring[i0 * 2 + 1]) * frac;
+      L[i] = this._lastL = l; R[i] = this._lastR = rr;
+      frac += step;
+      while (frac >= 1 && this._ringFill > 1) { frac -= 1; r = (r + 1) % cap; this._ringFill--; }
     }
-    this._audioQueue.length = 0;
+    this._ringRead = r; this._resamplePos = frac;
+    if (this._ringFill <= 1) this._primed = false;   // re-prime after a dropout
   }
 
   dispose() {
@@ -306,6 +355,7 @@ export class MgbaHost {
     if (mod) {
       try { mod._retro_unload_game(); mod._retro_deinit(); } catch { /* ignore */ }
     }
+    if (this._audioNode) { try { this._audioNode.disconnect(); this._audioNode.onaudioprocess = null; } catch { /* ignore */ } this._audioNode = null; }
     if (this._audioCtx) { try { this._audioCtx.close(); } catch { /* ignore */ } this._audioCtx = null; }
     this.mod = null;
     this._latestFrame = null;

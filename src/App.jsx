@@ -12,6 +12,7 @@ import { RamViewer } from "./emu/RamViewer.jsx";
 import { build, prewarm } from "./build/build-client.js";
 import { Sidebar } from "./projects/Sidebar.jsx";
 import { NewProjectModal, BLANK_SOURCE } from "./projects/NewProjectModal.jsx";
+import { ProjectSettings } from "./projects/ProjectSettings.jsx";
 import { listProjects, getProject, createProject, saveProject, deleteProject } from "./projects/store.js";
 import { loadExampleFiles } from "./examples.js";
 import { readManifest, writeManifest, ensureManifest, defaultManifest } from "./projects/manifest.js";
@@ -49,6 +50,7 @@ export default function App() {
   const [projects, setProjects] = useState([]);
   const [currentId, setCurrentId] = useState(null);
   const [projectName, setProjectName] = useState("");
+  const [manifest, setManifest] = useState({});    // parsed project.json
   const [source, setSource] = useState("");
   const [sheet, setSheet] = useState(null);        // {width,height,px} or null
   const [mapPng, setMapPng] = useState(null);      // Uint8Array or null
@@ -94,6 +96,7 @@ export default function App() {
     const mf = {};
     for (const [p, v] of Object.entries(rec.files)) if (p.startsWith("music/")) mf[p] = asBytes(v);
     setMusicFiles(mf);
+    setManifest(readManifest(rec.files["project.json"] && asText(rec.files["project.json"]), rec.name));
     setView("code");
     setRom(null); setBuildMsg(""); setBuildErr("");
   }, []);
@@ -221,12 +224,13 @@ export default function App() {
 
   const rename = useCallback((name) => {
     setProjectName(name);
-    persist("name", (rec) => {
-      rec.name = name || "untitled";
-      const m = readManifest(rec.files["project.json"] && asText(rec.files["project.json"]), rec.name);
-      m.title = rec.name;
-      rec.files["project.json"] = writeManifest(m);
-    });
+    persist("name", (rec) => { rec.name = name || "untitled"; });
+  }, [persist]);
+
+  // Settings tab: persist the project.json manifest (title / romname).
+  const onProjectChange = useCallback((next) => {
+    setManifest(next);
+    persist("manifest", (rec) => { rec.files["project.json"] = writeManifest(next); });
   }, [persist]);
 
   // --- build assets from the project state --------------------------------------
@@ -301,9 +305,13 @@ export default function App() {
   }, []);
 
   // --- export / import -------------------------------------------------------------
+  const romName = () => {
+    const n = (manifest.romname || projectName || "game").replace(/\.gba$/i, "");
+    return `${n}.gba`;
+  };
   const downloadRom = useCallback(() => {
-    if (rom) downloadBytes(`${projectName || "game"}.gba`, rom);
-  }, [rom, projectName]);
+    if (rom) downloadBytes(romName(), rom);
+  }, [rom, manifest, projectName]);
 
   const exportBundle = useCallback(async () => {
     const rec = currentId ? await getProject(currentId) : { files: { "main.lua": source } };
@@ -365,6 +373,7 @@ export default function App() {
     ["mode7", "mode 7"],
     ["palette", "palette"],
     ["effects", "effects"],
+    ["settings", "⚙ settings"],
     ["cheat", "📖 cheatsheet"],
   ];
 
@@ -380,8 +389,7 @@ export default function App() {
         <button className="tb-btn" onClick={downloadRom} disabled={!rom} title="download the built .gba ROM">.gba</button>
         <button className="tb-btn" onClick={importBundle} title="import a project .zip or a PICO-8 .p8 / .p8.png cart">import</button>
         <button className="tb-btn" onClick={exportBundle} disabled={!currentId} title="export the project as a plain .zip">export</button>
-        <input className="proj-name" value={projectName} placeholder="project name"
-          onChange={(e) => rename(e.target.value)} disabled={!currentId} />
+        {currentId && <span className="proj-title" title="edit in the Settings tab">{projectName || "untitled"}</span>}
         <span className={"status " + (errors.length ? "err" : "ok")}>
           {errors.length ? `${errors.length} error${errors.length > 1 ? "s" : ""}` : warm ? "ready" : "warming up…"}
           {warnings.length ? ` · ${warnings.length} warning${warnings.length > 1 ? "s" : ""}` : ""}
@@ -445,6 +453,10 @@ export default function App() {
               {view === "mode7" && <Mode7Pane mode7Png={mode7Png} onImport={() => setView("bg")} />}
               {view === "palette" && <PalettePane sheet={sheet} />}
               {view === "effects" && <EffectsPane />}
+              {view === "settings" && (
+                <ProjectSettings project={manifest} onChange={onProjectChange}
+                  projectName={projectName} onRename={rename} />
+              )}
               {view === "cheat" && (
                 <Suspense fallback={<div className="pane-loading">loading…</div>}>
                   <CheatsheetPane onClose={() => setView("code")} embedded />

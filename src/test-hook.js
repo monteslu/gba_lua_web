@@ -46,6 +46,37 @@ export function installTestHook() {
       canvas.remove();
       return url;
     },
+    /** boot a ROM, capture the core's audio into the ring, report stream stats */
+    async audioProbe(romBase64, frames = 300) {
+      const bytes = Uint8Array.from(atob(romBase64), (c) => c.charCodeAt(0));
+      const host = await new MgbaHost().load(bytes);
+      // stand in for the AudioContext so _pushAudio accepts samples, and
+      // capture everything the core emits (no ScriptProcessor pull, so nothing
+      // drains — we read the raw produced stream)
+      const captured = [];
+      host._audioCtx = { sampleRate: host.sampleRate, state: "running", resume() {}, close() {} };
+      host._ringCap = 1e9;   // never overrun during capture
+      host._ring = null;
+      host._pushAudio = (interleaved, n) => {
+        for (let i = 0; i < n * 2; i++) captured.push(interleaved[i] / 32768);
+      };
+      for (let i = 0; i < frames; i++) host.mod._retro_run();
+      host.dispose();
+      // measure the captured stereo stream
+      let peak = 0, sumSq = 0;
+      for (const v of captured) { const a = Math.abs(v); if (a > peak) peak = a; sumSq += v * v; }
+      const rms = Math.sqrt(sumSq / Math.max(1, captured.length));
+      // continuity: longest run of near-zero samples AFTER audio first starts
+      // (skip the boot/intro silence — that's the ROM, not the audio path)
+      let firstSound = captured.findIndex((v) => Math.abs(v) > 1e-3);
+      if (firstSound < 0) firstSound = captured.length;
+      let maxSilentRun = 0, run = 0;
+      for (let i = firstSound; i < captured.length; i++) {
+        if (Math.abs(captured[i]) < 1e-4) { if (++run > maxSilentRun) maxSilentRun = run; } else run = 0;
+      }
+      const framesPerVideoFrame = captured.length / 2 / frames;
+      return { samples: captured.length, peak, rms, maxSilentRun, firstSound, framesPerVideoFrame };
+    },
     /** boot a base64 ROM on an offscreen canvas, run n frames, return canvas pixels sum */
     async bootSmoke(romBase64, frames = 120) {
       const bytes = Uint8Array.from(atob(romBase64), (c) => c.charCodeAt(0));

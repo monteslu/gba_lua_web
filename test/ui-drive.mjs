@@ -47,7 +47,7 @@ try {
   // ---- 2. clone hello -> project opens, sidebar lists it ---------------------
   await page.click(".newproj-card:has-text('hello') button:has-text('Clone')");
   await page.waitForSelector(".side-list li.active", { timeout: 10000 });
-  const projName = await page.$eval(".proj-name", (i) => i.value);
+  const projName = await page.$eval(".proj-title", (i) => i.textContent);
   ok("cloning an example creates+opens a project", projName === "hello", projName);
 
   // ---- 3. Play through the real button ---------------------------------------
@@ -195,7 +195,7 @@ try {
   // ---- 9. backgrounds pane on the mode7 example -----------------------------------
   await page.click(".side-new");
   await page.click(".newproj-card:has-text('mode7') button:has-text('Clone')");
-  await page.waitForFunction(() => document.querySelector(".proj-name")?.value === "mode7", { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector(".proj-title")?.textContent === "mode7", { timeout: 10000 });
   await page.click(".pane-tabs .tab:has-text('backgrounds')");
   await page.waitForSelector(".bg-pane", { timeout: 5000 });
   const bgPreviews = await page.$$eval(".asset-preview", (c) => c.length);
@@ -300,17 +300,28 @@ ${"0".repeat(128)}
   const fc2 = page.waitForEvent("filechooser");
   await page.click("button:has-text('import')");
   await (await fc2).setFiles(p8Path);
-  await page.waitForFunction(() => document.querySelector(".proj-name")?.value === "testcart", { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector(".proj-title")?.textContent === "testcart", { timeout: 10000 });
   const p8src = await page.evaluate(() => window.__gbaluaWeb.getSource());
   ok("p8 import creates a project with a porting banner", /imported from a PICO-8 cart/.test(p8src));
   const hasSheet = await page.$eval(".pane-tabs .tab:nth-child(2)", (t) => t.textContent);
   ok("p8 __gfx__ became the sprite sheet", /^sprites/.test(hasSheet.trim()), hasSheet.trim());
 
-  // ---- 13. rename + delete -----------------------------------------------------------
-  await page.fill(".proj-name", "renamed-cart");
+  // ---- 12b. settings tab: rename + game title + rom filename ------------------------
+  await page.click(".pane-tabs .tab:has-text('settings')");
+  await page.waitForSelector(".settings", { timeout: 5000 });
+  const fields = await page.$$(".settings-field input");
+  await fields[0].fill("renamed-cart");       // project name
+  await fields[1].fill("My Cart Title");      // game title
+  await fields[2].fill("mycart.gba");         // rom filename
   await page.waitForTimeout(700);
+  // the header title mirrors the project name
+  const headerTitle = await page.$eval(".proj-title", (el) => el.textContent);
+  ok("settings tab renames the project (header + sidebar reflect it)", headerTitle === "renamed-cart", headerTitle);
   const sideHas = await page.$$eval(".side-list .side-item", (b) => b.map((x) => x.textContent));
   ok("rename persists to the sidebar", sideHas.includes("renamed-cart"), sideHas.join(", "));
+  // the game-title field holds what we set (persisted to project.json)
+  const titleAfter = await fields[1].inputValue();
+  ok("settings tab holds the game title", titleAfter === "My Cart Title", titleAfter);
   await page.hover(".side-list li.active");
   await page.click(".side-list li.active .side-del");
   await page.waitForSelector(".confirm-box", { timeout: 5000 });
