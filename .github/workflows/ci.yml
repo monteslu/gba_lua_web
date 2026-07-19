@@ -14,8 +14,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: GameTank tripwire (this is a GBA project)
+        # Catches GameTank CODE and ASSETS leaking in: an import/require of the
+        # gtlua SDK or its core, or a GameTank file format (.gtg sheets, .gtm2
+        # songs, .gsi frame tables, .gtr carts). Deliberately NOT a bare
+        # "gametank" text match — the hardware panes legitimately explain what
+        # the GBA has that the GameTank does not, and prose is not residue.
         run: |
-          if grep -rniE "gametank|\.gtg\b|\.gtm2\b|\.gsi\b" src/ scripts/ test/ index.html README.md 2>/dev/null; then
+          if grep -rniE "(from|require\(|import)[^\n]*['\"](gtlua|romdev-core-gametank)|\.(gtg|gtm2|gsi|gtr)\b" \
+               src/ scripts/ test/ index.html 2>/dev/null; then
             echo "GameTank residue found — this repo must stay GBA-only"; exit 1
           fi
 
