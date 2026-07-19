@@ -55,7 +55,7 @@ vite.stderr.on("data", (d) => { viteOut += d; });
 const ready = await new Promise((resolve) => {
   const t = setTimeout(() => resolve(false), 30000);
   const iv = setInterval(() => {
-    if (/localhost:5273/.test(viteOut)) { clearTimeout(t); clearInterval(iv); resolve(true); }
+    if (/localhost:5273/.test(viteOut.replace(/\x1b\[[0-9;]*m/g, ""))) { clearTimeout(t); clearInterval(iv); resolve(true); }
   }, 200);
 });
 if (!ready) { killVite(); throw new Error("vite dev did not start:\n" + viteOut); }
